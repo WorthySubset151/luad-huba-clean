@@ -1,0 +1,33 @@
+# Dane (duże pliki - nie trafiają do repo)
+data/raw/
+data/interim/
+data/processed/
+data/external/
+
+# Logi
+logs/
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Środowisko
+.env
+.envrc
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
