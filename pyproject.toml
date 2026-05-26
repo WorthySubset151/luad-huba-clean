@@ -1,0 +1,20 @@
+[project]
+name = "luad-huba"
+version = "0.1.0"
+description = "Pipeline przygotowania danych RNA-seq i klinicznych TCGA-LUAD dla modeli predykcji przeżywalności"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.0",
+    "loguru>=0.7",
+    "polars>=0.20",
+    "pandas>=2.0",
+    "pyarrow>=15.0",
+    "requests>=2.31",
+    "streamlit>=1.35",
+    "plotly>=5.20",
+    "lifelines>=0.28",
+    "scikit-survival>=0.22",
+    "scipy>=1.13",
+    "numpy>=1.26",
+]
