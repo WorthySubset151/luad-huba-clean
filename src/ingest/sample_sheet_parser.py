@@ -29,6 +29,8 @@ OUTPUT_COLUMNS: list[str] = [
     "case_id",
     "sample_id",
     "tissue_type",
+    "tcga_sample_code",
+    "is_tumor",
 ]
 
 VALID_TISSUE_TYPES: set[str] = {"Normal", "Tumor"}
@@ -45,7 +47,26 @@ class SampleSheetParserError(Exception):
 
 
 def parse_sample_sheet(path: str | Path) -> pl.DataFrame:
-    """Analizuje plik gdc_sample_sheet pobierany z koszyka portalu GDC."""
+    """Analizuje plik gdc_sample_sheet pobierany z koszyka portalu GDC.
+
+    Plik zawiera mapowanie identyfikatorów plików pobranych z GDC na metadane
+    próbek (pacjent TCGA, typ tkanki, kod próbki). Parser wzbogaca dane
+    o dwie kolumny pochodne: ``tcga_sample_code`` (np. ``11A``) oraz
+    flagę ``is_tumor`` wyznaczaną na podstawie kolumny ``Tissue Type``.
+
+    Argumenty:
+        path: Ścieżka do pliku ``gdc_sample_sheet*.tsv``.
+
+    Zwraca:
+        Obiekt polars DataFrame z kolumnami OUTPUT_COLUMNS.
+
+    Zgłasza:
+        FileNotFoundError: Jeśli plik nie istnieje.
+        SampleSheetParserError: Jeśli plik nie zawiera wymaganych kolumn,
+            zawiera nieprawidłowe identyfikatory UUID lub TCGA, zawiera
+            niedopuszczalne wartości w kolumnie Tissue Type, lub zawiera
+            zduplikowane identyfikatory plików.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Nie znaleziono pliku gdc_sample_sheet: {path}")
@@ -103,4 +124,11 @@ def parse_sample_sheet(path: str | Path) -> pl.DataFrame:
     if df["file_id"].n_unique() != df.height:
         raise SampleSheetParserError(f"Znaleziono zduplikowane file_id w {path.name}")
 
-    return df.select(OUTPUT_COLUMNS)
+    df = df.with_columns(
+        [
+            pl.col("sample_id").str.slice(-3).alias("tcga_sample_code"),
+            (pl.col("tissue_type") == "Tumor").alias("is_tumor"),
+        ]
+    ).select(OUTPUT_COLUMNS)
+
+    return df
