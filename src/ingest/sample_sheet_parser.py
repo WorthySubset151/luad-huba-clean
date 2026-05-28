@@ -2,6 +2,7 @@
 
 __author__ = "Łukasz Połaski"
 
+import re
 from pathlib import Path
 
 import polars as pl
@@ -31,6 +32,12 @@ OUTPUT_COLUMNS: list[str] = [
 ]
 
 VALID_TISSUE_TYPES: set[str] = {"Normal", "Tumor"}
+
+UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+TCGA_CASE_ID_PATTERN = re.compile(r"^TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}$")
+TCGA_SAMPLE_ID_PATTERN = re.compile(r"^TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}-[0-9]{2}[A-Z]$")
 
 
 class SampleSheetParserError(Exception):
@@ -62,6 +69,27 @@ def parse_sample_sheet(path: str | Path) -> pl.DataFrame:
 
     df = df.select(SOURCE_COLUMNS).rename(COLUMN_RENAME_MAP)
 
+    invalid_uuid = df.filter(~pl.col("file_id").str.contains(UUID_PATTERN.pattern))
+    if invalid_uuid.height > 0:
+        sample = invalid_uuid["file_id"].head(3).to_list()
+        raise SampleSheetParserError(
+            f"Nieprawidłowy format UUID w kolumnie file_id w {path.name}: {sample}"
+        )
+
+    invalid_case = df.filter(~pl.col("case_id").str.contains(TCGA_CASE_ID_PATTERN.pattern))
+    if invalid_case.height > 0:
+        sample = invalid_case["case_id"].head(3).to_list()
+        raise SampleSheetParserError(
+            f"Nieprawidłowy format TCGA Case ID w {path.name}: {sample}"
+        )
+
+    invalid_sample = df.filter(~pl.col("sample_id").str.contains(TCGA_SAMPLE_ID_PATTERN.pattern))
+    if invalid_sample.height > 0:
+        sample = invalid_sample["sample_id"].head(3).to_list()
+        raise SampleSheetParserError(
+            f"Nieprawidłowy format TCGA Sample ID w {path.name}: {sample}"
+        )
+
     unknown_tissues = (
         df.filter(~pl.col("tissue_type").is_in(VALID_TISSUE_TYPES))
         ["tissue_type"].unique().to_list()
@@ -71,5 +99,8 @@ def parse_sample_sheet(path: str | Path) -> pl.DataFrame:
             f"Niedopuszczalne wartości tissue_type w {path.name}: {unknown_tissues}. "
             f"Oczekiwane: {sorted(VALID_TISSUE_TYPES)}"
         )
+
+    if df["file_id"].n_unique() != df.height:
+        raise SampleSheetParserError(f"Znaleziono zduplikowane file_id w {path.name}")
 
     return df.select(OUTPUT_COLUMNS)
