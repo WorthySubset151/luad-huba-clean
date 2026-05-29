@@ -35,6 +35,8 @@ COLUMN_RENAME_MAP: dict[str, str] = {
 OUTPUT_COLUMNS: list[str] = [
     "case_submitter_id",
     "vital_status",
+    "time",
+    "event",
     "days_to_death",
     "days_to_last_follow_up",
     "age_at_index",
@@ -45,7 +47,9 @@ OUTPUT_COLUMNS: list[str] = [
 ]
 
 VALID_VITAL_STATUSES: set[str] = {"Alive", "Dead"}
+
 GDC_NULL_VALUES: list[str] = ["", "NA", "'--", "--", "not reported", "Not Reported"]
+
 TCGA_CASE_ID_PATTERN = re.compile(r"^TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}$")
 
 
@@ -56,7 +60,26 @@ class ClinicalParserError(Exception):
 def parse_clinical(path: str | Path) -> pl.DataFrame:
     """Analizuje plik clinical.tsv z koszyka portalu GDC.
 
-    Filtruje do diagnoz podstawowych i deduplikuje do jednego wiersza na pacjenta.
+    Plik wejściowy jest zdenormalizowany - jeden pacjent może mieć wiele
+    wierszy odpowiadających różnym diagnozom i schematom leczenia. Parser:
+
+    1. Filtruje wiersze do diagnoz podstawowych (``diagnosis_is_primary_disease=true``)
+    2. Deduplikuje, zachowując jeden wiersz na pacjenta
+    3. Wylicza ``time`` (czas przeżycia) i ``event`` (zgon) na podstawie
+       ``vital_status``, ``days_to_death`` oraz ``days_to_last_follow_up``,
+       zgodnie z konwencją *overall survival*
+
+    Argumenty:
+        path: Ścieżka do pliku ``clinical.tsv`` z portalu GDC.
+
+    Zwraca:
+        DataFrame z jednym wierszem na pacjenta i kolumnami OUTPUT_COLUMNS.
+
+    Zgłasza:
+        FileNotFoundError: Jeśli plik nie istnieje.
+        ClinicalParserError: Jeśli plik nie zawiera wymaganych kolumn,
+            zawiera nieznane wartości vital_status, zawiera nieprawidłowe
+            identyfikatory TCGA, lub pacjent ma brak czasu obserwacji.
     """
     path = Path(path)
     if not path.exists():
@@ -115,6 +138,24 @@ def parse_clinical(path: str | Path) -> pl.DataFrame:
         raise ClinicalParserError(
             f"Nieznane wartości vital_status w {path.name}: {unknown_vital}. "
             f"Oczekiwane: {sorted(VALID_VITAL_STATUSES)}"
+        )
+
+    df = df.with_columns(
+        [
+            (pl.col("vital_status") == "Dead").alias("event"),
+            pl.when(pl.col("vital_status") == "Dead")
+            .then(pl.col("days_to_death"))
+            .otherwise(pl.col("days_to_last_follow_up"))
+            .alias("time"),
+        ]
+    )
+
+    no_time = df.filter(pl.col("time").is_null())
+    if no_time.height > 0:
+        cases = no_time["case_submitter_id"].head(3).to_list()
+        raise ClinicalParserError(
+            f"Pacjenci bez czasu obserwacji w {path.name}: {cases}. "
+            f"Sprawdź days_to_death oraz days_to_last_follow_up."
         )
 
     return df.select(OUTPUT_COLUMNS).sort("case_submitter_id")
