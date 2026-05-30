@@ -1,0 +1,16 @@
+pipeline:
+  project_id: "TCGA-LUAD"
+  workflow_type: "STAR - Counts"
+  output_dir: "data/processed"
+
+normalization:
+  method: "tpm"               # opcje: tpm, log2cpm
+  biotype_filter: "protein_coding"
+  min_samples_expressed: 10   # min liczba próbek z ekspresją > 0
+  min_count_threshold: 1
+
+survival:
+  time_column: "days_to_last_follow_up"
+  event_column: "vital_status"
+  event_positive_value: "Dead"
+  min_follow_up_days: 30
