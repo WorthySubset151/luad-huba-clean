@@ -2,6 +2,9 @@
 
 __author__ = "Łukasz Połaski"
 
+import hashlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -29,7 +32,30 @@ def build_expression_matrix(
     sample_sheet: pl.DataFrame,
     metric: str = "unstranded",
 ) -> pl.DataFrame:
-    """Łączy pliki Parquet z parsowanych STAR-Counts w jedną macierz ekspresji."""
+    """Łączy pliki Parquet z parsowanych STAR-Counts w jedną macierz ekspresji.
+
+    Każdy plik Parquet zawiera dane jednej próbki (60 660 genów x 9 kolumn).
+    Funkcja wyciąga z każdej próbki wybraną metrykę i tworzy macierz
+    o wymiarach (n_genów x n_próbek+1), gdzie pierwsza kolumna to ``gene_id``,
+    a kolejne kolumny noszą nazwy ``sample_id`` z arkusza próbek.
+
+    Argumenty:
+        parquet_paths: Lista ścieżek do plików Parquet z ``data/interim/star_counts/``.
+        sample_sheet: DataFrame z parserem ``parse_sample_sheet``. Musi zawierać
+            kolumny ``file_name`` i ``sample_id``.
+        metric: Nazwa kolumny ekspresji do wyciągnięcia. Dozwolone wartości
+            w ``ALLOWED_METRICS``.
+
+    Zwraca:
+        DataFrame o strukturze:
+            gene_id | <sample_id_1> | <sample_id_2> | ...
+
+    Zgłasza:
+        ExpressionMatrixError: Jeśli lista plików jest pusta, metric jest
+            nieobsługiwana, sample_sheet nie ma wymaganych kolumn, brakuje
+            mapowania file -> sample_id, kolejność/zawartość gene_id różni się
+            między plikami, lub wynik ma duplikaty sample_id.
+    """
     if not parquet_paths:
         raise ExpressionMatrixError("Lista plików parquet jest pusta")
 
@@ -83,6 +109,41 @@ def build_expression_matrix(
     return matrix
 
 
+def build_manifest(
+    matrix: pl.DataFrame,
+    parquet_paths: list[Path],
+    metric: str,
+) -> dict:
+    """Buduje słownik metadanych opisujący zbudowaną macierz ekspresji.
+
+    Manifest dokumentuje: liczbę próbek i genów, identyfikatory próbek,
+    listę plików źródłowych, metrykę, datę utworzenia i skrót zawartości.
+
+    Argumenty:
+        matrix: Wynik funkcji ``build_expression_matrix``.
+        parquet_paths: Lista plików źródłowych w tej samej kolejności.
+        metric: Nazwa zastosowanej metryki ekspresji.
+
+    Zwraca:
+        Słownik z polami: ``created_at``, ``metric``, ``n_samples``, ``n_genes``,
+        ``sample_ids``, ``source_files``, ``content_hash``.
+    """
+    sample_ids = [c for c in matrix.columns if c != "gene_id"]
+    content_hash = hashlib.sha256(
+        matrix.write_csv().encode("utf-8")
+    ).hexdigest()
+
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "metric": metric,
+        "n_samples": len(sample_ids),
+        "n_genes": matrix.height,
+        "sample_ids": sample_ids,
+        "source_files": [p.name for p in parquet_paths],
+        "content_hash": content_hash,
+    }
+
+
 def _build_stem_to_sample_map(sample_sheet: pl.DataFrame) -> dict[str, str]:
     """Buduje mapowanie stem_pliku -> sample_id z arkusza próbek."""
     mapping: dict[str, str] = {}
@@ -108,3 +169,8 @@ def _read_and_validate_parquet(path: Path, metric: str) -> pl.DataFrame:
         )
 
     return df
+
+
+def save_manifest(manifest: dict, output_path: Path) -> None:
+    """Zapisuje manifest jako sformatowany JSON."""
+    output_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
