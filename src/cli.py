@@ -10,12 +10,17 @@ import typer
 from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
 from src.ingest.sample_sheet_parser import SampleSheetParserError, parse_sample_sheet
 from src.ingest.star_parser import StarParserError, parse_star_counts
+from src.ingest.clinical_parser import ClinicalParserError, parse_clinical
 from src.transform.expression_matrix import (
     ALLOWED_METRICS,
     ExpressionMatrixError,
     build_expression_matrix,
     build_manifest,
     save_manifest,
+)
+from src.transform.survival_dataset import (
+    SurvivalDatasetError,
+    build_survival_dataset,
 )
 
 app = typer.Typer(
@@ -227,6 +232,100 @@ def build_matrix(
     typer.secho(f"Manifest zapisany: {manifest_path}", fg=typer.colors.GREEN)
     typer.secho(
         f"Zakończono. Rozmiar pliku: {matrix_path.stat().st_size / 1024:.1f} KB",
+        fg=typer.colors.BRIGHT_GREEN,
+    )
+
+
+@app.command("build-survival")
+def build_survival(
+    matrix_path: Path = typer.Option(
+        Path("data/processed/expression_matrix.parquet"),
+        "--matrix",
+        help="Ścieżka do macierzy ekspresji z komendy build-matrix.",
+    ),
+    sample_sheet: Path = typer.Option(
+        None,
+        "--sample-sheet",
+        help="Ścieżka do gdc_sample_sheet. Domyślnie wyszukiwana w data/raw/.",
+    ),
+    clinical_path: Path = typer.Option(
+        None,
+        "--clinical",
+        help="Ścieżka do clinical.tsv. Domyślnie wyszukiwana w data/raw/.",
+    ),
+    output_dir: Path = typer.Option(
+        _default_processed_dir(),
+        "--output-dir",
+        help="Katalog wyjściowy na zbiór do analizy przeżywalności.",
+    ),
+    tumor_only: bool = typer.Option(
+        True,
+        "--tumor-only/--all-samples",
+        help="Zachowaj wyłącznie próbki nowotworowe (domyślnie) lub wszystkie.",
+    ),
+) -> None:
+    """Buduje zbiór do analizy przeżywalności z macierzy ekspresji i danych klinicznych."""
+    if not matrix_path.exists():
+        typer.secho(f"Nie znaleziono macierzy ekspresji: {matrix_path}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    if sample_sheet is None:
+        try:
+            sample_sheet = _find_sample_sheet(_default_raw_dir())
+        except FileNotFoundError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    if clinical_path is None:
+        candidates = sorted(_default_raw_dir().glob("clinical*.tsv"))
+        if not candidates:
+            typer.secho(
+                f"Nie znaleziono pliku clinical*.tsv w {_default_raw_dir()}",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        clinical_path = candidates[0]
+
+    import polars as pl
+
+    typer.echo(f"Wczytuję macierz: {matrix_path}")
+    matrix = pl.read_parquet(matrix_path)
+
+    typer.echo(f"Wczytuję sample sheet: {sample_sheet}")
+    typer.echo(f"Wczytuję dane kliniczne: {clinical_path}")
+    try:
+        sheet_df = parse_sample_sheet(sample_sheet)
+        clinical_df = parse_clinical(clinical_path)
+    except (SampleSheetParserError, ClinicalParserError, FileNotFoundError) as exc:
+        typer.secho(f"Błąd wczytywania metadanych: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    mode = "tylko nowotworowe" if tumor_only else "wszystkie"
+    typer.echo(f"Buduję zbiór przeżywalności (próbki: {mode})")
+    try:
+        dataset = build_survival_dataset(
+            expression_matrix=matrix,
+            sample_sheet=sheet_df,
+            clinical=clinical_df,
+            tumor_only=tumor_only,
+        )
+    except SurvivalDatasetError as exc:
+        typer.secho(f"Błąd budowania zbioru: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "survival_dataset.parquet"
+    dataset.write_parquet(out_path)
+
+    n_genes = len([c for c in dataset.columns if c.startswith("ENSG")])
+    n_events = int(dataset["event"].sum())
+    typer.secho(
+        f"Zbiór zapisany: {out_path} "
+        f"({dataset.height} próbek x {n_genes} genów, zdarzenia: {n_events})",
+        fg=typer.colors.GREEN,
+    )
+    typer.secho(
+        f"Zakończono. Rozmiar pliku: {out_path.stat().st_size / 1024:.1f} KB",
         fg=typer.colors.BRIGHT_GREEN,
     )
 
