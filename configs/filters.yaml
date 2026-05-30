@@ -1,0 +1,5 @@
+qc:
+  require_vital_status: true
+  require_days_to_event: true
+  max_duplicate_case_ids: 0
+  min_mapped_reads: 1000000
