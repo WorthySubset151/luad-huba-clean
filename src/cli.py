@@ -8,7 +8,15 @@ from pathlib import Path
 import typer
 
 from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
+from src.ingest.sample_sheet_parser import SampleSheetParserError, parse_sample_sheet
 from src.ingest.star_parser import StarParserError, parse_star_counts
+from src.transform.expression_matrix import (
+    ALLOWED_METRICS,
+    ExpressionMatrixError,
+    build_expression_matrix,
+    build_manifest,
+    save_manifest,
+)
 
 app = typer.Typer(
     help=(
@@ -139,6 +147,86 @@ def parse_star(
 
     typer.secho(
         f"Zakończono. Przetworzono {processed} plik(i). Wyniki w: {output_dir}",
+        fg=typer.colors.BRIGHT_GREEN,
+    )
+
+
+@app.command("build-matrix")
+def build_matrix(
+    input_dir: Path = typer.Option(
+        _default_interim_dir(),
+        "--input-dir",
+        help="Katalog z plikami Parquet z etapu parse-star.",
+    ),
+    sample_sheet: Path = typer.Option(
+        None,
+        "--sample-sheet",
+        help="Ścieżka do pliku gdc_sample_sheet. Jeśli pominięta, plik jest "
+             "wyszukiwany automatycznie w data/raw/.",
+    ),
+    output_dir: Path = typer.Option(
+        _default_processed_dir(),
+        "--output-dir",
+        help="Katalog wyjściowy na macierz ekspresji i manifest.",
+    ),
+    metric: ExpressionMetric = typer.Option(
+        ExpressionMetric.UNSTRANDED,
+        "--metric",
+        help="Metryka ekspresji do wyciągnięcia z plików parquet.",
+    ),
+) -> None:
+    """Buduje macierz ekspresji genów z plików Parquet po parse-star."""
+    if not input_dir.exists():
+        typer.secho(f"Nie znaleziono katalogu wejściowego: {input_dir}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    parquet_paths = sorted(input_dir.glob("*.parquet"))
+    if not parquet_paths:
+        typer.secho(f"Brak plików Parquet w {input_dir}", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    if sample_sheet is None:
+        try:
+            sample_sheet = _find_sample_sheet(_default_raw_dir())
+        except FileNotFoundError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    typer.echo(f"Wczytuję sample sheet: {sample_sheet}")
+    try:
+        sheet_df = parse_sample_sheet(sample_sheet)
+    except (SampleSheetParserError, FileNotFoundError) as exc:
+        typer.secho(f"Błąd wczytywania sample sheet: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"Buduję macierz z {len(parquet_paths)} plik(ów) parquet, metryka: {metric.value}"
+    )
+    try:
+        matrix = build_expression_matrix(
+            parquet_paths=parquet_paths,
+            sample_sheet=sheet_df,
+            metric=metric.value,
+        )
+    except ExpressionMatrixError as exc:
+        typer.secho(f"Błąd budowania macierzy: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    matrix_path = output_dir / "expression_matrix.parquet"
+    manifest_path = output_dir / "expression_matrix_manifest.json"
+
+    matrix.write_parquet(matrix_path)
+    manifest = build_manifest(matrix, parquet_paths, metric.value)
+    save_manifest(manifest, manifest_path)
+
+    typer.secho(
+        f"Macierz zapisana: {matrix_path} ({matrix.height} genów x {matrix.width - 1} próbek)",
+        fg=typer.colors.GREEN,
+    )
+    typer.secho(f"Manifest zapisany: {manifest_path}", fg=typer.colors.GREEN)
+    typer.secho(
+        f"Zakończono. Rozmiar pliku: {matrix_path.stat().st_size / 1024:.1f} KB",
         fg=typer.colors.BRIGHT_GREEN,
     )
 
