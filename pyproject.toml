@@ -26,6 +26,10 @@ dev = [
     "black>=24.0",
 ]
 
+[project.scripts]
+luad-huba = "src.cli:app"
+ingest-sample-sheet = "src.ingest.sample_sheet_ingestion:main"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
