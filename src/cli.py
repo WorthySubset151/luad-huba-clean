@@ -11,6 +11,7 @@ from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
 from src.ingest.sample_sheet_parser import SampleSheetParserError, parse_sample_sheet
 from src.ingest.star_parser import StarParserError, parse_star_counts
 from src.ingest.clinical_parser import ClinicalParserError, parse_clinical
+from src.validate.runner import discover_stems, run_cohort_qc, save_qc_report
 from src.transform.expression_matrix import (
     ALLOWED_METRICS,
     ExpressionMatrixError,
@@ -328,6 +329,94 @@ def build_survival(
         f"Zakończono. Rozmiar pliku: {out_path.stat().st_size / 1024:.1f} KB",
         fg=typer.colors.BRIGHT_GREEN,
     )
+
+
+
+@app.command("validate-cohort")
+def validate_cohort(
+    sample_sheet: Path = typer.Option(
+        None,
+        "--sample-sheet",
+        help="Ścieżka do gdc_sample_sheet. Domyślnie wyszukiwana w data/raw/.",
+    ),
+    clinical_path: Path = typer.Option(
+        None,
+        "--clinical",
+        help="Ścieżka do clinical.tsv. Domyślnie wyszukiwana w data/raw/.",
+    ),
+    interim_dir: Path = typer.Option(
+        _default_interim_dir(),
+        "--interim-dir",
+        help="Katalog z plikami Parquet po parse-star (źródło stemów plików).",
+    ),
+    log_dir: Path = typer.Option(
+        Path("logs/qc"),
+        "--log-dir",
+        help="Katalog na strukturyzowane raporty QC w formacie JSON.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Jeśli ustawione, kończy z kodem 1 przy jakimkolwiek błędzie ERROR.",
+    ),
+) -> None:
+    """Uruchamia kontrolę spójności kohorty i zapisuje raport QC."""
+    if sample_sheet is None:
+        try:
+            sample_sheet = _find_sample_sheet(_default_raw_dir())
+        except FileNotFoundError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    if clinical_path is None:
+        candidates = sorted(_default_raw_dir().glob("clinical*.tsv"))
+        if not candidates:
+            typer.secho(
+                f"Nie znaleziono pliku clinical*.tsv w {_default_raw_dir()}",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        clinical_path = candidates[0]
+
+    typer.echo(f"Wczytuję sample sheet: {sample_sheet}")
+    typer.echo(f"Wczytuję dane kliniczne: {clinical_path}")
+    typer.echo(f"Skanuję katalog plików: {interim_dir}")
+
+    try:
+        sheet_df = parse_sample_sheet(sample_sheet)
+        clinical_df = parse_clinical(clinical_path)
+    except (SampleSheetParserError, ClinicalParserError, FileNotFoundError) as exc:
+        typer.secho(f"Błąd wczytywania metadanych: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    available_stems = discover_stems(interim_dir)
+    typer.echo(f"Znaleziono {len(available_stems)} plik(ów) w {interim_dir}")
+
+    report = run_cohort_qc(sheet_df, clinical_df, available_stems)
+    log_path = save_qc_report(report, log_dir)
+
+    summary = report.summary()
+    typer.echo("")
+    typer.secho("=== Podsumowanie QC ===", fg=typer.colors.CYAN)
+    typer.echo(f"  Wszystkie problemy: {summary['total']}")
+    typer.secho(
+        f"  ERROR:    {summary['errors']}",
+        fg=typer.colors.RED if summary["errors"] else typer.colors.GREEN,
+    )
+    typer.secho(
+        f"  WARNING:  {summary['warnings']}",
+        fg=typer.colors.YELLOW if summary["warnings"] else typer.colors.GREEN,
+    )
+    typer.echo(f"  INFO:     {summary['info']}")
+    typer.echo("")
+    typer.secho(f"Raport zapisany: {log_path}", fg=typer.colors.GREEN)
+
+    if strict and report.has_errors:
+        typer.secho(
+            f"Tryb --strict: zakończono z błędem ({report.n_errors} ERROR)",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
