@@ -331,7 +331,6 @@ def build_survival(
     )
 
 
-
 @app.command("validate-cohort")
 def validate_cohort(
     sample_sheet: Path = typer.Option(
