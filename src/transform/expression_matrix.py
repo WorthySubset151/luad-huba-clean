@@ -20,6 +20,8 @@ ALLOWED_METRICS: set[str] = {
     "fpkm_uq_unstranded",
 }
 
+VALID_DUPLICATE_STRATEGIES: set[str] = {"fail", "deepest", "first"}
+
 SAMPLE_SHEET_REQUIRED_COLUMNS: set[str] = {"file_name", "sample_id"}
 
 
@@ -31,6 +33,7 @@ def build_expression_matrix(
     parquet_paths: list[Path],
     sample_sheet: pl.DataFrame,
     metric: str = "unstranded",
+    duplicate_strategy: str = "fail",
 ) -> pl.DataFrame:
     """Łączy pliki Parquet z parsowanych STAR-Counts w jedną macierz ekspresji.
 
@@ -45,6 +48,12 @@ def build_expression_matrix(
             kolumny ``file_name`` i ``sample_id``.
         metric: Nazwa kolumny ekspresji do wyciągnięcia. Dozwolone wartości
             w ``ALLOWED_METRICS``.
+        duplicate_strategy: Strategia obsługi duplikatów sample_id (jeden sample_id
+            mający kilka plików, np. wielokrotne aliquoty w TCGA):
+
+            - ``fail`` (domyślnie): rzuca wyjątek przy wykryciu duplikatów
+            - ``deepest``: wybiera plik z największą sumą wartości metryki
+            - ``first``: wybiera pierwszy plik alfabetycznie po ścieżce
 
     Zwraca:
         DataFrame o strukturze:
@@ -54,7 +63,7 @@ def build_expression_matrix(
         ExpressionMatrixError: Jeśli lista plików jest pusta, metric jest
             nieobsługiwana, sample_sheet nie ma wymaganych kolumn, brakuje
             mapowania file -> sample_id, kolejność/zawartość gene_id różni się
-            między plikami, lub wynik ma duplikaty sample_id.
+            między plikami, lub wynik ma duplikaty sample_id (przy strategy=fail).
     """
     if not parquet_paths:
         raise ExpressionMatrixError("Lista plików parquet jest pusta")
@@ -62,6 +71,12 @@ def build_expression_matrix(
     if metric not in ALLOWED_METRICS:
         raise ExpressionMatrixError(
             f"Niedozwolona metryka: {metric!r}. Dozwolone: {sorted(ALLOWED_METRICS)}"
+        )
+
+    if duplicate_strategy not in VALID_DUPLICATE_STRATEGIES:
+        raise ExpressionMatrixError(
+            f"Niedozwolona strategia deduplikacji: {duplicate_strategy!r}. "
+            f"Dozwolone: {sorted(VALID_DUPLICATE_STRATEGIES)}"
         )
 
     missing_cols = SAMPLE_SHEET_REQUIRED_COLUMNS - set(sample_sheet.columns)
@@ -82,9 +97,13 @@ def build_expression_matrix(
         sample_ids.append(stem_to_sample[stem])
 
     if len(set(sample_ids)) != len(sample_ids):
-        duplicates = [s for s in sample_ids if sample_ids.count(s) > 1]
-        raise ExpressionMatrixError(
-            f"Duplikaty sample_id w wyniku: {sorted(set(duplicates))}"
+        if duplicate_strategy == "fail":
+            duplicates = sorted({s for s in sample_ids if sample_ids.count(s) > 1})
+            raise ExpressionMatrixError(
+                f"Duplikaty sample_id w wyniku: {duplicates}"
+            )
+        parquet_paths, sample_ids = _deduplicate(
+            parquet_paths, sample_ids, strategy=duplicate_strategy, metric=metric
         )
 
     first_df = _read_and_validate_parquet(parquet_paths[0], metric)
@@ -174,3 +193,38 @@ def _read_and_validate_parquet(path: Path, metric: str) -> pl.DataFrame:
 def save_manifest(manifest: dict, output_path: Path) -> None:
     """Zapisuje manifest jako sformatowany JSON."""
     output_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _deduplicate(
+    paths: list[Path],
+    sample_ids: list[str],
+    strategy: str,
+    metric: str,
+) -> tuple[list[Path], list[str]]:
+    """Wybiera jeden plik per sample_id zgodnie ze strategią.
+
+    - ``deepest``: dla każdego sample_id wybiera plik z największą sumą metryki
+    - ``first``: dla każdego sample_id wybiera plik z najmniejszą ścieżką (sort alfabetyczny)
+    """
+    groups: dict[str, list[Path]] = {}
+    for path, sid in zip(paths, sample_ids):
+        groups.setdefault(sid, []).append(path)
+
+    chosen_paths: list[Path] = []
+    chosen_sample_ids: list[str] = []
+    for sid, group in groups.items():
+        if len(group) == 1:
+            chosen_paths.append(group[0])
+        elif strategy == "first":
+            chosen_paths.append(sorted(group)[0])
+        elif strategy == "deepest":
+            chosen_paths.append(max(group, key=lambda p: _read_metric_sum(p, metric)))
+        chosen_sample_ids.append(sid)
+
+    return chosen_paths, chosen_sample_ids
+
+
+def _read_metric_sum(path: Path, metric: str) -> float:
+    """Wczytuje tylko kolumnę metryki z pliku Parquet i zwraca jej sumę."""
+    df = pl.read_parquet(path, columns=[metric])
+    return float(df[metric].sum())

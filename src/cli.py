@@ -50,6 +50,14 @@ class ExpressionMetric(str, Enum):
     FPKM_UQ_UNSTRANDED = "fpkm_uq_unstranded"
 
 
+class DuplicateStrategy(str, Enum):
+    """Strategia obsługi duplikatów sample_id w macierzy ekspresji."""
+
+    FAIL = "fail"
+    DEEPEST = "deepest"
+    FIRST = "first"
+
+
 def _default_raw_dir() -> Path:
     return Path("data/raw")
 
@@ -180,6 +188,14 @@ def build_matrix(
         "--metric",
         help="Metryka ekspresji do wyciągnięcia z plików parquet.",
     ),
+    duplicate_strategy: DuplicateStrategy = typer.Option(
+        DuplicateStrategy.FAIL,
+        "--duplicate-strategy",
+        help=(
+            "Strategia obsługi duplikatów sample_id (zdarza się w TCGA przy "
+            "wielokrotnych aliquotach): fail (domyślnie), deepest, first."
+        ),
+    ),
 ) -> None:
     """Buduje macierz ekspresji genów z plików Parquet po parse-star."""
     if not input_dir.exists():
@@ -213,6 +229,7 @@ def build_matrix(
             parquet_paths=parquet_paths,
             sample_sheet=sheet_df,
             metric=metric.value,
+            duplicate_strategy=duplicate_strategy.value,
         )
     except ExpressionMatrixError as exc:
         typer.secho(f"Błąd budowania macierzy: {exc}", fg=typer.colors.RED)
