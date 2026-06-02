@@ -27,6 +27,9 @@ build/
 # macOS
 .DS_Store
 
+# Anaconda
+anaconda_projects/
+
 # IDE
 .idea/
 .vscode/
