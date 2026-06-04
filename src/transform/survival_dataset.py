@@ -2,6 +2,8 @@
 
 __author__ = "Łukasz Połaski"
 
+import sys
+
 import polars as pl
 
 METADATA_COLUMNS: list[str] = [
@@ -109,9 +111,18 @@ def build_survival_dataset(
 
     unmatched_clinical = dataset.filter(pl.col("time").is_null())
     if unmatched_clinical.height > 0:
-        cases = unmatched_clinical["case_id"].head(3).to_list()
+        cases = unmatched_clinical["case_id"].unique().to_list()
+        print(
+            f"survival_dataset: pominięto {unmatched_clinical.height} próbek "
+            f"bez dopasowania w danych klinicznych "
+            f"({len(cases)} unikalnych pacjentów, przykłady: {cases[:3]})",
+            file=sys.stderr,
+        )
+        dataset = dataset.filter(pl.col("time").is_not_null())
+
+    if dataset.height == 0:
         raise SurvivalDatasetError(
-            f"Próbki bez dopasowania w danych klinicznych (case_id): {cases}"
+            "Po filtrze próbek bez dopasowania klinicznego nie pozostała żadna próbka"
         )
 
     ordered_columns = METADATA_COLUMNS + genes
