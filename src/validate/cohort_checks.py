@@ -115,14 +115,15 @@ def check_cases_have_clinical(
 def check_duplicate_samples(sample_sheet: pl.DataFrame) -> list[QCIssue]:
     """Sprawdza, czy ten sam identyfikator próbki nie występuje wielokrotnie.
 
-    Duplikat sample_id wprowadza niejednoznaczność - nie wiadomo, który plik
-    reprezentuje daną próbkę. Błąd.
+    W TCGA występowanie tej samej próbki w wielu plikach jest scenariuszem
+    legalnym (różne aliquoty, ponowna analiza), obsługiwanym przez parametr
+    ``duplicate_strategy`` w ``build_expression_matrix``. Ostrzeżenie, nie błąd.
 
     Argumenty:
         sample_sheet: DataFrame z ``parse_sample_sheet`` (kolumna: sample_id).
 
     Zwraca:
-        Lista problemów o kategorii DUPLICATE_SAMPLE i istotności ERROR.
+        Lista problemów o kategorii DUPLICATE_SAMPLE i istotności WARNING.
     """
     counts = (
         sample_sheet.group_by("sample_id")
@@ -133,7 +134,7 @@ def check_duplicate_samples(sample_sheet: pl.DataFrame) -> list[QCIssue]:
 
     return [
         QCIssue(
-            severity=Severity.ERROR,
+            severity=Severity.WARNING,
             category=QCCategory.DUPLICATE_SAMPLE,
             message=f"Próbka {row['sample_id']} występuje {row['len']} razy",
             context={"sample_id": row["sample_id"], "count": row["len"]},
