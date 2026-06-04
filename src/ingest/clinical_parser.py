@@ -3,6 +3,7 @@
 __author__ = "Łukasz Połaski"
 
 import re
+import sys
 from pathlib import Path
 
 import polars as pl
@@ -152,10 +153,18 @@ def parse_clinical(path: str | Path) -> pl.DataFrame:
 
     no_time = df.filter(pl.col("time").is_null())
     if no_time.height > 0:
-        cases = no_time["case_submitter_id"].head(3).to_list()
+        cases = no_time["case_submitter_id"].to_list()
+        print(
+            f"clinical_parser: pominięto {len(cases)} pacjentów bez czasu obserwacji "
+            f"w {path.name} (przykłady: {cases[:3]}). "
+            f"Sprawdź days_to_death oraz days_to_last_follow_up.",
+            file=sys.stderr,
+        )
+        df = df.filter(pl.col("time").is_not_null())
+
+    if df.height == 0:
         raise ClinicalParserError(
-            f"Pacjenci bez czasu obserwacji w {path.name}: {cases}. "
-            f"Sprawdź days_to_death oraz days_to_last_follow_up."
+            f"Po filtrze pacjentów bez czasu obserwacji nie pozostał żaden rekord w {path.name}"
         )
 
     return df.select(OUTPUT_COLUMNS).sort("case_submitter_id")
