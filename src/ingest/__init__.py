@@ -1,9 +1,9 @@
-from src.ingest.sample_sheet_parser import (
-    OUTPUT_COLUMNS as SAMPLE_SHEET_OUTPUT_COLUMNS,
-    SOURCE_COLUMNS as SAMPLE_SHEET_SOURCE_COLUMNS,
-    VALID_TISSUE_TYPES,
-    SampleSheetParserError,
-    parse_sample_sheet,
+from src.ingest.clinical_parser import (
+    OUTPUT_COLUMNS as CLINICAL_OUTPUT_COLUMNS,
+    SOURCE_COLUMNS as CLINICAL_SOURCE_COLUMNS,
+    VALID_VITAL_STATUSES,
+    ClinicalParserError,
+    parse_clinical,
 )
 from src.ingest.file_naming import (
     STAR_FILE_PATTERNS,
