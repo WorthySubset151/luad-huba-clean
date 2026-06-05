@@ -10,6 +10,17 @@ from src.ingest.file_naming import (
     STAR_FILE_SUFFIXES,
     extract_star_file_stem,
 )
+from src.ingest.gdc_client import (
+    BASE_URL as GDC_BASE_URL,
+    DEFAULT_DATA_TYPE as GDC_DEFAULT_DATA_TYPE,
+    DEFAULT_PROJECT_ID as GDC_DEFAULT_PROJECT_ID,
+    DEFAULT_WORKFLOW_TYPE as GDC_DEFAULT_WORKFLOW_TYPE,
+    OUTPUT_COLUMNS as GDC_OUTPUT_COLUMNS,
+    GDCClientError,
+    build_files_filter,
+    parse_files_response,
+    query_files,
+)
 from src.ingest.metadata_parser import (
     OUTPUT_COLUMNS as METADATA_OUTPUT_COLUMNS,
     REQUIRED_TOP_LEVEL_FIELDS as METADATA_REQUIRED_TOP_LEVEL_FIELDS,
@@ -36,6 +47,12 @@ __all__ = [
     "CLINICAL_SOURCE_COLUMNS",
     "COUNT_COLUMNS",
     "ClinicalParserError",
+    "GDC_BASE_URL",
+    "GDC_DEFAULT_DATA_TYPE",
+    "GDC_DEFAULT_PROJECT_ID",
+    "GDC_DEFAULT_WORKFLOW_TYPE",
+    "GDC_OUTPUT_COLUMNS",
+    "GDCClientError",
     "META_ROW_IDS",
     "METADATA_OUTPUT_COLUMNS",
     "METADATA_REQUIRED_TOP_LEVEL_FIELDS",
@@ -49,9 +66,12 @@ __all__ = [
     "StarParserError",
     "VALID_TISSUE_TYPES",
     "VALID_VITAL_STATUSES",
+    "build_files_filter",
     "extract_star_file_stem",
     "parse_clinical",
+    "parse_files_response",
     "parse_metadata",
     "parse_sample_sheet",
     "parse_star_counts",
+    "query_files",
 ]
