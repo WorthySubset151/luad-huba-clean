@@ -1,3 +1,12 @@
+from src.ingest.cases_client import (
+    CASES_ENDPOINT as GDC_CASES_ENDPOINT,
+    DEFAULT_FIELDS as CASES_DEFAULT_FIELDS,
+    OUTPUT_COLUMNS as CASES_OUTPUT_COLUMNS,
+    CasesClientError,
+    build_cases_filter,
+    parse_cases_response,
+    query_cases,
+)
 from src.ingest.clinical_parser import (
     OUTPUT_COLUMNS as CLINICAL_OUTPUT_COLUMNS,
     SOURCE_COLUMNS as CLINICAL_SOURCE_COLUMNS,
@@ -45,11 +54,15 @@ from src.ingest.star_parser import (
 )
 
 __all__ = [
+    "CASES_DEFAULT_FIELDS",
+    "CASES_OUTPUT_COLUMNS",
     "CLINICAL_OUTPUT_COLUMNS",
     "CLINICAL_SOURCE_COLUMNS",
     "COUNT_COLUMNS",
+    "CasesClientError",
     "ClinicalParserError",
     "GDC_BASE_URL",
+    "GDC_CASES_ENDPOINT",
     "GDC_DEFAULT_DATA_TYPE",
     "GDC_DEFAULT_PROJECT_ID",
     "GDC_DEFAULT_WORKFLOW_TYPE",
@@ -69,13 +82,16 @@ __all__ = [
     "StarParserError",
     "VALID_TISSUE_TYPES",
     "VALID_VITAL_STATUSES",
+    "build_cases_filter",
     "build_files_filter",
     "download_files",
     "extract_star_file_stem",
+    "parse_cases_response",
     "parse_clinical",
     "parse_files_response",
     "parse_metadata",
     "parse_sample_sheet",
     "parse_star_counts",
+    "query_cases",
     "query_files",
 ]
