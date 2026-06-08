@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import polars as pl
 import typer
 
 from src.cli_config import (
@@ -14,7 +15,19 @@ from src.cli_config import (
     load_config,
     resolve_metric,
 )
+from src.ingest.cases_client import (
+    CasesClientError,
+    parse_cases_response,
+    query_cases,
+)
 from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
+from src.ingest.gdc_client import (
+    GDCClientError,
+    build_files_filter,
+    download_files,
+    parse_files_response,
+    query_files,
+)
 from src.ingest.sample_sheet_parser import SampleSheetParserError, parse_sample_sheet
 from src.ingest.star_parser import StarParserError, parse_star_counts
 from src.ingest.clinical_parser import ClinicalParserError, parse_clinical
@@ -538,6 +551,195 @@ def validate_cohort(
             fg=typer.colors.RED,
         )
         raise typer.Exit(code=1)
+
+
+@app.command("download")
+def download(
+    output_dir: Path = typer.Option(
+        _default_raw_dir(),
+        "--output-dir",
+        help="Katalog docelowy na pobrane pliki (domyślnie data/raw/).",
+    ),
+    project: Optional[str] = typer.Option(
+        None,
+        "--project",
+        help="Identyfikator projektu GDC. Pierwszeństwo: flaga > config > 'TCGA-LUAD'.",
+    ),
+    workflow: Optional[str] = typer.Option(
+        None,
+        "--workflow",
+        help="Workflow GDC. Pierwszeństwo: flaga > config > 'STAR - Counts'.",
+    ),
+    size: Optional[int] = typer.Option(
+        None,
+        "--size",
+        help="Limit liczby plików do pobrania (do testów). Domyślnie wszystkie.",
+    ),
+    skip_files: bool = typer.Option(
+        False,
+        "--skip-files",
+        help="Tylko metadane (sample_sheet, clinical, metadata.cart.json), "
+             "bez plików STAR.",
+    ),
+    skip_clinical: bool = typer.Option(
+        False,
+        "--skip-clinical",
+        help="Pomiń pobieranie clinical.tsv (np. jeśli już masz lokalnie).",
+    ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Plik YAML z parametrami pipeline'u. Używane pola: "
+             "pipeline.project_id, pipeline.workflow_type.",
+    ),
+) -> None:
+    """Pobiera pełną kohortę z GDC: pliki STAR-Counts, sample sheet, clinical.tsv, metadata.cart.json.
+
+    Po wykonaniu w output_dir znajdują się 4 typy plików - dokładnie te same,
+    które można pobrać ręcznie z portalu GDC. Pipeline jest dalej w pełni
+    samowystarczalny, bez ręcznych kroków w przeglądarce.
+
+    Przykład: luad-huba download --project TCGA-LUAD --size 5
+    """
+    cfg: dict = {}
+    if config is not None:
+        try:
+            cfg = load_config(config)
+            typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
+        except ConfigError as exc:
+            typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    if project is None:
+        project = get_nested(cfg, "pipeline", "project_id", default="TCGA-LUAD")
+    if workflow is None:
+        workflow = get_nested(cfg, "pipeline", "workflow_type", default="STAR - Counts")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    typer.secho(
+        f"=== Pobieranie kohorty z GDC: project={project}, workflow='{workflow}' ===",
+        fg=typer.colors.CYAN,
+    )
+    if size is not None:
+        typer.echo(f"Limit liczby plików: {size}")
+
+    typer.echo("")
+    typer.echo("[1/4] Zapytanie o metadane plików...")
+    try:
+        filt = build_files_filter(project_id=project, workflow_type=workflow)
+        page_size = size if size is not None else 10000
+        response = query_files(filters=filt, size=page_size)
+    except GDCClientError as exc:
+        typer.secho(f"Błąd zapytania /files: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
+
+    files_metadata = parse_files_response(response)
+    total_available = response.get("data", {}).get("pagination", {}).get("total", 0)
+    typer.secho(
+        f"  Otrzymano metadane dla {files_metadata.height} plików "
+        f"(z {total_available} dostępnych)",
+        fg=typer.colors.GREEN,
+    )
+
+    typer.echo("")
+    typer.echo("[2/4] Zapis sample_sheet.tsv i metadata.cart.json...")
+    sheet_path = output_dir / "gdc_sample_sheet.tsv"
+    _write_sample_sheet(files_metadata, sheet_path)
+    typer.secho(f"  Zapisano: {sheet_path}", fg=typer.colors.GREEN)
+
+    metadata_path = output_dir / "metadata.cart.json"
+    _write_metadata_cart(response, metadata_path)
+    typer.secho(f"  Zapisano: {metadata_path}", fg=typer.colors.GREEN)
+
+    if skip_clinical:
+        typer.echo("")
+        typer.secho("[3/4] Pomijam clinical.tsv (--skip-clinical)", fg=typer.colors.YELLOW)
+    else:
+        typer.echo("")
+        typer.echo("[3/4] Zapytanie o dane kliniczne (/cases)...")
+        try:
+            response_cases = query_cases(size=10000)
+        except CasesClientError as exc:
+            typer.secho(f"Błąd zapytania /cases: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+        cases_df = parse_cases_response(response_cases)
+        clinical_path = output_dir / "clinical.tsv"
+        cases_df.write_csv(clinical_path, separator="\t", quote_style="never")
+        typer.secho(
+            f"  Zapisano: {clinical_path} ({cases_df.height} wierszy, "
+            f"{cases_df['cases.submitter_id'].n_unique()} pacjentów)",
+            fg=typer.colors.GREEN,
+        )
+
+    if skip_files:
+        typer.echo("")
+        typer.secho("[4/4] Pomijam pobieranie plików STAR (--skip-files)", fg=typer.colors.YELLOW)
+    else:
+        typer.echo("")
+        total_mb = files_metadata["file_size"].sum() / 1024**2
+        typer.echo(
+            f"[4/4] Pobieranie {files_metadata.height} plików STAR-Counts "
+            f"(~{total_mb:.0f} MB)..."
+        )
+        download_result = download_files(
+            metadata=files_metadata,
+            output_dir=output_dir,
+            show_progress=True,
+        )
+        n_verified = download_result.filter(pl.col("verified")).height
+        n_failed = download_result.filter(~pl.col("verified")).height
+        typer.secho(
+            f"  Pobrano: {n_verified}/{download_result.height} plików zweryfikowanych",
+            fg=typer.colors.GREEN if n_failed == 0 else typer.colors.YELLOW,
+        )
+        if n_failed > 0:
+            typer.secho(f"  BŁĘDY: {n_failed} plików nie zweryfikowanych", fg=typer.colors.RED)
+
+    typer.echo("")
+    typer.secho("=== Kohorta gotowa w " + str(output_dir) + " ===", fg=typer.colors.BRIGHT_GREEN)
+
+
+def _write_sample_sheet(files_metadata, output_path: Path) -> None:
+    """Zapisuje gdc_sample_sheet.tsv w formacie z portalu GDC."""
+    sheet = files_metadata.select([
+        pl.col("file_id").alias("File ID"),
+        pl.col("file_name").alias("File Name"),
+        pl.col("data_type").alias("Data Type"),
+        pl.col("experimental_strategy").alias("Data Category"),
+        pl.lit("TCGA-LUAD").alias("Project ID"),
+        pl.col("case_submitter_id").alias("Case ID"),
+        pl.col("sample_id").alias("Sample ID"),
+        pl.col("sample_id")
+            .str.slice(-3, 3)
+            .map_elements(_tcga_code_to_sample_type, return_dtype=pl.Utf8)
+            .alias("Sample Type"),
+    ])
+    sheet.write_csv(output_path, separator="\t", quote_style="never")
+
+
+def _tcga_code_to_sample_type(code: str) -> str:
+    """Mapuje TCGA sample code (np. '01A', '11A') na nazwę Sample Type."""
+    if not code or len(code) < 2:
+        return "Unknown"
+    try:
+        num = int(code[:2])
+    except ValueError:
+        return "Unknown"
+    if 1 <= num <= 9:
+        return "Primary Tumor" if num == 1 else "Recurrent Tumor" if num == 2 else "Tumor"
+    if 10 <= num <= 19:
+        return "Solid Tissue Normal"
+    return "Other"
+
+
+def _write_metadata_cart(response: dict, output_path: Path) -> None:
+    """Zapisuje metadata.cart.json w formacie identycznym z eksportem portalu."""
+    import json as json_lib
+    hits = response.get("data", {}).get("hits", [])
+    with output_path.open("w", encoding="utf-8") as fh:
+        json_lib.dump(hits, fh, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":
