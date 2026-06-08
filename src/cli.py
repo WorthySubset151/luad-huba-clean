@@ -702,7 +702,13 @@ def download(
 
 
 def _write_sample_sheet(files_metadata, output_path: Path) -> None:
-    """Zapisuje gdc_sample_sheet.tsv w formacie z portalu GDC."""
+    """Zapisuje gdc_sample_sheet.tsv w formacie z portalu GDC.
+
+    Format zawiera dwie podobne kolumny dotyczące rodzaju próbki:
+    - 'Sample Type' - szczegółowy typ (Primary Tumor, Solid Tissue Normal, ...)
+    - 'Tissue Type' - binarna klasyfikacja (Tumor/Normal), używana przez
+      sample_sheet_parser do obliczania flagi is_tumor w pipeline'ie
+    """
     sheet = files_metadata.select([
         pl.col("file_id").alias("File ID"),
         pl.col("file_name").alias("File Name"),
@@ -713,10 +719,34 @@ def _write_sample_sheet(files_metadata, output_path: Path) -> None:
         pl.col("sample_id").alias("Sample ID"),
         pl.col("sample_id")
             .str.slice(-3, 3)
+            .map_elements(_tcga_code_to_tissue_type, return_dtype=pl.Utf8)
+            .alias("Tissue Type"),
+        pl.col("sample_id")
+            .str.slice(-3, 3)
             .map_elements(_tcga_code_to_sample_type, return_dtype=pl.Utf8)
             .alias("Sample Type"),
     ])
     sheet.write_csv(output_path, separator="\t", quote_style="never")
+
+
+def _tcga_code_to_tissue_type(code: str) -> str:
+    """Mapuje TCGA sample code (np. '01A', '11A') na nazwę Tissue Type.
+
+    Binarna klasyfikacja używana w pipeline'ie do flagi is_tumor:
+    - kody 01-09 -> Tumor
+    - kody 10-19 -> Normal
+    """
+    if not code or len(code) < 2:
+        return "Unknown"
+    try:
+        num = int(code[:2])
+    except ValueError:
+        return "Unknown"
+    if 1 <= num <= 9:
+        return "Tumor"
+    if 10 <= num <= 19:
+        return "Normal"
+    return "Unknown"
 
 
 def _tcga_code_to_sample_type(code: str) -> str:
