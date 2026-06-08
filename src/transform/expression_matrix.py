@@ -133,34 +133,9 @@ def build_manifest(
     parquet_paths: list[Path],
     metric: str,
 ) -> dict:
-    """Buduje słownik metadanych opisujący zbudowaną macierz ekspresji.
-
-    Manifest dokumentuje: liczbę próbek i genów, identyfikatory próbek,
-    listę plików źródłowych, metrykę, datę utworzenia i skrót zawartości.
-
-    Argumenty:
-        matrix: Wynik funkcji ``build_expression_matrix``.
-        parquet_paths: Lista plików źródłowych w tej samej kolejności.
-        metric: Nazwa zastosowanej metryki ekspresji.
-
-    Zwraca:
-        Słownik z polami: ``created_at``, ``metric``, ``n_samples``, ``n_genes``,
-        ``sample_ids``, ``source_files``, ``content_hash``.
-    """
-    sample_ids = [c for c in matrix.columns if c != "gene_id"]
-    content_hash = hashlib.sha256(
-        matrix.write_csv().encode("utf-8")
-    ).hexdigest()
-
-    return {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "metric": metric,
-        "n_samples": len(sample_ids),
-        "n_genes": matrix.height,
-        "sample_ids": sample_ids,
-        "source_files": [p.name for p in parquet_paths],
-        "content_hash": content_hash,
-    }
+    """Reekspr z src.export.manifest dla backward compatibility."""
+    from src.export.manifest import build_manifest as _impl
+    return _impl(matrix, parquet_paths, metric)
 
 
 def _build_stem_to_sample_map(sample_sheet: pl.DataFrame) -> dict[str, str]:
@@ -191,8 +166,9 @@ def _read_and_validate_parquet(path: Path, metric: str) -> pl.DataFrame:
 
 
 def save_manifest(manifest: dict, output_path: Path) -> None:
-    """Zapisuje manifest jako sformatowany JSON."""
-    output_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Reekspr z src.export.manifest dla backward compatibility."""
+    from src.export.manifest import save_manifest as _impl
+    _impl(manifest, output_path)
 
 
 def _deduplicate(
