@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=15.0",
     "requests>=2.31",
     "tqdm>=4.66",
+    "pyyaml>=6.0",
     "streamlit>=1.35",
     "plotly>=5.20",
     "lifelines>=0.28",

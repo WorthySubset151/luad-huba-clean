@@ -4,9 +4,16 @@ __author__ = "Łukasz Połaski"
 
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 import typer
 
+from src.cli_config import (
+    ConfigError,
+    get_nested,
+    load_config,
+    resolve_metric,
+)
 from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
 from src.ingest.sample_sheet_parser import SampleSheetParserError, parse_sample_sheet
 from src.ingest.star_parser import StarParserError, parse_star_counts
@@ -119,8 +126,22 @@ def parse_star(
         "--format",
         help="Format zapisu wynikowego dla każdego pliku wejściowego.",
     ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Plik YAML z parametrami pipeline'u. Wczytywany informacyjnie - "
+             "obecnie parse-star nie używa pól z YAML, ale przyszłe rozszerzenia będą.",
+    ),
 ) -> None:
     """Parsuje wszystkie pliki STAR-Counts i zapisuje je do katalogu wyjściowego."""
+    if config is not None:
+        try:
+            load_config(config)
+            typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
+        except ConfigError as exc:
+            typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
     if not input_dir.exists():
         typer.secho(f"Nie znaleziono katalogu wejściowego: {input_dir}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -183,10 +204,11 @@ def build_matrix(
         "--output-dir",
         help="Katalog wyjściowy na macierz ekspresji i manifest.",
     ),
-    metric: ExpressionMetric = typer.Option(
-        ExpressionMetric.UNSTRANDED,
+    metric: Optional[ExpressionMetric] = typer.Option(
+        None,
         "--metric",
-        help="Metryka ekspresji do wyciągnięcia z plików parquet.",
+        help="Metryka ekspresji do wyciągnięcia z plików parquet. "
+             "Pierwszeństwo: flaga CLI > config YAML > domyślnie 'unstranded'.",
     ),
     duplicate_strategy: DuplicateStrategy = typer.Option(
         DuplicateStrategy.FAIL,
@@ -196,8 +218,39 @@ def build_matrix(
             "wielokrotnych aliquotach): fail (domyślnie), deepest, first."
         ),
     ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Plik YAML z parametrami pipeline'u (np. configs/default.yaml). "
+             "Wartości z YAML są używane jako domyślne dla nieustawionych flag CLI.",
+    ),
 ) -> None:
     """Buduje macierz ekspresji genów z plików Parquet po parse-star."""
+    cfg: dict = {}
+    if config is not None:
+        try:
+            cfg = load_config(config)
+            typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
+        except ConfigError as exc:
+            typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
+    if metric is None:
+        cfg_metric = get_nested(cfg, "normalization", "method")
+        if cfg_metric is not None:
+            try:
+                resolved = resolve_metric(cfg_metric)
+                metric = ExpressionMetric(resolved)
+                typer.secho(
+                    f"Metryka z configu: '{cfg_metric}' -> '{resolved}'",
+                    fg=typer.colors.CYAN,
+                )
+            except ConfigError as exc:
+                typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+                raise typer.Exit(code=1) from exc
+        else:
+            metric = ExpressionMetric.UNSTRANDED
+
     if not input_dir.exists():
         typer.secho(f"Nie znaleziono katalogu wejściowego: {input_dir}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -281,8 +334,23 @@ def build_survival(
         "--tumor-only/--all-samples",
         help="Zachowaj wyłącznie próbki nowotworowe (domyślnie) lub wszystkie.",
     ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Plik YAML z parametrami pipeline'u. Wczytywany informacyjnie - "
+             "obecnie build-survival nie używa pól z YAML, ale w przyszłości "
+             "stąd będą pobierane np. survival.min_follow_up_days.",
+    ),
 ) -> None:
     """Buduje zbiór do analizy przeżywalności z macierzy ekspresji i danych klinicznych."""
+    if config is not None:
+        try:
+            load_config(config)
+            typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
+        except ConfigError as exc:
+            typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
     if not matrix_path.exists():
         typer.secho(f"Nie znaleziono macierzy ekspresji: {matrix_path}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -375,8 +443,23 @@ def validate_cohort(
         "--strict",
         help="Jeśli ustawione, kończy z kodem 1 przy jakimkolwiek błędzie ERROR.",
     ),
+    config: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Plik YAML z parametrami pipeline'u. Wczytywany informacyjnie - "
+             "obecnie validate-cohort nie używa pól z YAML, ale w przyszłości "
+             "stąd będą pobierane np. qc.min_mapped_reads.",
+    ),
 ) -> None:
     """Uruchamia kontrolę spójności kohorty i zapisuje raport QC."""
+    if config is not None:
+        try:
+            load_config(config)
+            typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
+        except ConfigError as exc:
+            typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
+
     if sample_sheet is None:
         try:
             sample_sheet = _find_sample_sheet(_default_raw_dir())
