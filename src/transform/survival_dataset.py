@@ -36,6 +36,7 @@ def build_survival_dataset(
     clinical: pl.DataFrame,
     tumor_only: bool = True,
     gene_ids: list[str] | None = None,
+    min_follow_up_days: int = 0,
 ) -> pl.DataFrame:
     """Integruje macierz ekspresji, arkusz próbek i dane kliniczne w jeden zbiór.
 
@@ -124,6 +125,24 @@ def build_survival_dataset(
         raise SurvivalDatasetError(
             "Po filtrze próbek bez dopasowania klinicznego nie pozostała żadna próbka"
         )
+
+    if min_follow_up_days > 0:
+        short_followup = dataset.filter(pl.col("time") < min_follow_up_days)
+        if short_followup.height > 0:
+            cases = short_followup["case_id"].unique().to_list()
+            print(
+                f"survival_dataset: pominięto {short_followup.height} próbek "
+                f"z time < {min_follow_up_days} dni "
+                f"({len(cases)} unikalnych pacjentów, przykłady: {cases[:3]})",
+                file=sys.stderr,
+            )
+            dataset = dataset.filter(pl.col("time") >= min_follow_up_days)
+
+        if dataset.height == 0:
+            raise SurvivalDatasetError(
+                f"Po filtrze min_follow_up_days={min_follow_up_days} "
+                f"nie pozostała żadna próbka"
+            )
 
     ordered_columns = METADATA_COLUMNS + genes
     return dataset.select(ordered_columns).sort("sample_id")

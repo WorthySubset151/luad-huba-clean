@@ -337,15 +337,16 @@ def build_survival(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
-        help="Plik YAML z parametrami pipeline'u. Wczytywany informacyjnie - "
-             "obecnie build-survival nie używa pól z YAML, ale w przyszłości "
-             "stąd będą pobierane np. survival.min_follow_up_days.",
+        help="Plik YAML z parametrami pipeline'u. "
+             "Używane pola: survival.min_follow_up_days (filtr próbek o krótkim "
+             "czasie obserwacji).",
     ),
 ) -> None:
     """Buduje zbiór do analizy przeżywalności z macierzy ekspresji i danych klinicznych."""
+    cfg: dict = {}
     if config is not None:
         try:
-            load_config(config)
+            cfg = load_config(config)
             typer.secho(f"Załadowano config: {config}", fg=typer.colors.CYAN)
         except ConfigError as exc:
             typer.secho(f"Błąd configu: {exc}", fg=typer.colors.RED)
@@ -388,12 +389,33 @@ def build_survival(
 
     mode = "tylko nowotworowe" if tumor_only else "wszystkie"
     typer.echo(f"Buduję zbiór przeżywalności (próbki: {mode})")
+
+    min_follow_up_days = 0
+    cfg_min_followup = get_nested(cfg, "survival", "min_follow_up_days")
+    if cfg_min_followup is not None:
+        try:
+            min_follow_up_days = int(cfg_min_followup)
+            if min_follow_up_days < 0:
+                raise ValueError("musi być >= 0")
+            typer.secho(
+                f"Filtr min_follow_up_days z configu: {min_follow_up_days} dni",
+                fg=typer.colors.CYAN,
+            )
+        except (ValueError, TypeError) as exc:
+            typer.secho(
+                f"Niepoprawna wartość survival.min_follow_up_days w configu: "
+                f"{cfg_min_followup!r} ({exc})",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1) from exc
+
     try:
         dataset = build_survival_dataset(
             expression_matrix=matrix,
             sample_sheet=sheet_df,
             clinical=clinical_df,
             tumor_only=tumor_only,
+            min_follow_up_days=min_follow_up_days,
         )
     except SurvivalDatasetError as exc:
         typer.secho(f"Błąd budowania zbioru: {exc}", fg=typer.colors.RED)
