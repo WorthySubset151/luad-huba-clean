@@ -4,6 +4,7 @@ __author__ = "Łukasz Połaski"
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def build_expression_matrix(
     sample_sheet: pl.DataFrame,
     metric: str = "unstranded",
     duplicate_strategy: str = "fail",
+    biotype_filter: str | None = None,
 ) -> pl.DataFrame:
     """Łączy pliki Parquet z parsowanych STAR-Counts w jedną macierz ekspresji.
 
@@ -55,6 +57,11 @@ def build_expression_matrix(
             - ``deepest``: wybiera plik z największą sumą wartości metryki
             - ``first``: wybiera pierwszy plik alfabetycznie po ścieżce
 
+        biotype_filter: Opcjonalny filtr po kolumnie ``gene_type`` z plików
+            STAR-Counts. Jeśli podany (np. ``"protein_coding"``), w wyniku
+            zostają tylko geny pasujące do tej kategorii GENCODE. Domyślnie
+            ``None`` = wszystkie 60660 genów (backward compatible).
+
     Zwraca:
         DataFrame o strukturze:
             gene_id | <sample_id_1> | <sample_id_2> | ...
@@ -63,7 +70,8 @@ def build_expression_matrix(
         ExpressionMatrixError: Jeśli lista plików jest pusta, metric jest
             nieobsługiwana, sample_sheet nie ma wymaganych kolumn, brakuje
             mapowania file -> sample_id, kolejność/zawartość gene_id różni się
-            między plikami, lub wynik ma duplikaty sample_id (przy strategy=fail).
+            między plikami, wynik ma duplikaty sample_id (przy strategy=fail),
+            lub filtr biotype_filter pozostawia 0 genów (nieistniejący biotype).
     """
     if not parquet_paths:
         raise ExpressionMatrixError("Lista plików parquet jest pusta")
@@ -123,6 +131,35 @@ def build_expression_matrix(
     if null_columns:
         raise ExpressionMatrixError(
             f"Macierz zawiera wartości null w kolumnach: {null_columns}"
+        )
+
+    if biotype_filter is not None:
+        gene_types_df = pl.read_parquet(
+            parquet_paths[0], columns=["gene_id", "gene_type"]
+        )
+        if not gene_types_df["gene_id"].equals(matrix["gene_id"]):
+            raise ExpressionMatrixError(
+                f"Niezgodność gene_id przy filtracji biotype "
+                f"({parquet_paths[0].name} vs macierz)"
+            )
+
+        mask = gene_types_df["gene_type"] == biotype_filter
+        n_total = matrix.height
+        n_kept = int(mask.sum())
+
+        if n_kept == 0:
+            available = sorted(gene_types_df["gene_type"].unique().to_list())
+            raise ExpressionMatrixError(
+                f"Filtr biotype_filter={biotype_filter!r} pozostawił 0 genów. "
+                f"Dostępne biotypy w danych: {available[:20]}"
+                + (f" ...i {len(available)-20} więcej" if len(available) > 20 else "")
+            )
+
+        matrix = matrix.filter(mask)
+        print(
+            f"expression_matrix: filtr biotype={biotype_filter!r}: "
+            f"{n_kept}/{n_total} genów zachowanych ({n_kept/n_total*100:.1f}%)",
+            file=sys.stderr,
         )
 
     return matrix

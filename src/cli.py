@@ -235,6 +235,8 @@ def build_matrix(
         None,
         "--config",
         help="Plik YAML z parametrami pipeline'u (np. configs/default.yaml). "
+             "Używane pola: normalization.method (alias metryki), "
+             "normalization.biotype_filter (filtr po gene_type, np. 'protein_coding'). "
              "Wartości z YAML są używane jako domyślne dla nieustawionych flag CLI.",
     ),
 ) -> None:
@@ -290,12 +292,28 @@ def build_matrix(
     typer.echo(
         f"Buduję macierz z {len(parquet_paths)} plik(ów) parquet, metryka: {metric.value}"
     )
+
+    biotype_filter = get_nested(cfg, "normalization", "biotype_filter")
+    if biotype_filter is not None:
+        if not isinstance(biotype_filter, str) or not biotype_filter.strip():
+            typer.secho(
+                f"Niepoprawna wartość normalization.biotype_filter w configu: "
+                f"{biotype_filter!r} (oczekiwany niepusty string)",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        typer.secho(
+            f"Filtr biotype z configu: {biotype_filter!r}",
+            fg=typer.colors.CYAN,
+        )
+
     try:
         matrix = build_expression_matrix(
             parquet_paths=parquet_paths,
             sample_sheet=sheet_df,
             metric=metric.value,
             duplicate_strategy=duplicate_strategy.value,
+            biotype_filter=biotype_filter,
         )
     except ExpressionMatrixError as exc:
         typer.secho(f"Błąd budowania macierzy: {exc}", fg=typer.colors.RED)
