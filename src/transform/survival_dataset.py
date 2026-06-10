@@ -37,6 +37,7 @@ def build_survival_dataset(
     tumor_only: bool = True,
     gene_ids: list[str] | None = None,
     min_follow_up_days: int = 0,
+    drop_zero_time: bool = True,
 ) -> pl.DataFrame:
     """Integruje macierz ekspresji, arkusz próbek i dane kliniczne w jeden zbiór.
 
@@ -53,15 +54,26 @@ def build_survival_dataset(
             Próbki tkanki prawidłowej służą tylko do kontroli jakości.
         gene_ids: Opcjonalna lista identyfikatorów genów do uwzględnienia. Jeśli None,
             zachowywane są wszystkie geny z macierzy.
+        min_follow_up_days: Próg krótkiego czasu obserwacji (w dniach). Jeśli > 0,
+            próbki **cenzurowane** z time < progu są usuwane (krótkie cenzury to
+            utracone obserwacje bez informacji o przeżyciu). Próbki ze **zdarzeniem**
+            (zgon) i time < progu są ZACHOWYWANE - wczesne zgony to realny sygnał
+            przeżyciowy, nie szum. Usunięcie ich zawyżyłoby optymizm modelu
+            (forma immortal time bias).
+        drop_zero_time: Jeśli True (domyślnie), usuwa wszystkie próbki z time <= 0,
+            niezależnie od event/censor. W TCGA time = 0 to artefakt PHI (daty
+            podawane z dokładnością do miesiąca są zaokrąglane do 15. dnia, co daje
+            wahanie 0-16 dni wg Liu et al. 2018, TCGA-CDR). Wartości <= 0 są też
+            nieużywalne w modelu Coxa (likelihood niezdefiniowany dla time = 0).
 
     Zwraca:
         DataFrame: sample_id | case_id | time | event | <kowarianty> | <geny...>
 
     Zgłasza:
         SurvivalDatasetError: Jeśli brakuje wymaganych kolumn w danych wejściowych,
-            wskazane gene_ids nie istnieją w macierzy, po filtrze nowotworowym
-            nie pozostała żadna próbka, lub próbka nie ma dopasowania w danych
-            klinicznych.
+            wskazane gene_ids nie istnieją w macierzy, po którymkolwiek z filtrów
+            (nowotworowy, time<=0, krótkie cenzury) nie pozostała żadna próbka,
+            lub próbka nie ma dopasowania w danych klinicznych.
     """
     _validate_inputs(expression_matrix, sample_sheet, clinical)
 
@@ -126,21 +138,57 @@ def build_survival_dataset(
             "Po filtrze próbek bez dopasowania klinicznego nie pozostała żadna próbka"
         )
 
-    if min_follow_up_days > 0:
-        short_followup = dataset.filter(pl.col("time") < min_follow_up_days)
-        if short_followup.height > 0:
-            cases = short_followup["case_id"].unique().to_list()
+    if drop_zero_time:
+        zero_time = dataset.filter(pl.col("time") <= 0)
+        if zero_time.height > 0:
+            cases = zero_time["case_id"].unique().to_list()
+            n_events = int(zero_time.filter(pl.col("event")).height)
             print(
-                f"survival_dataset: pominięto {short_followup.height} próbek "
-                f"z time < {min_follow_up_days} dni "
-                f"({len(cases)} unikalnych pacjentów, przykłady: {cases[:3]})",
+                f"survival_dataset: usunięto {zero_time.height} próbek z time <= 0 "
+                f"({len(cases)} pacjentów, w tym {n_events} ze zdarzeniem). "
+                f"Artefakt PHI (zaokrąglenie daty diagnozy) - nieużywalne w modelu "
+                f"przeżycia. Przykłady: {cases[:3]}",
                 file=sys.stderr,
             )
-            dataset = dataset.filter(pl.col("time") >= min_follow_up_days)
+            dataset = dataset.filter(pl.col("time") > 0)
 
         if dataset.height == 0:
             raise SurvivalDatasetError(
-                f"Po filtrze min_follow_up_days={min_follow_up_days} "
+                "Po filtrze time <= 0 nie pozostała żadna próbka"
+            )
+
+    if min_follow_up_days > 0:
+        short_censored = dataset.filter(
+            (pl.col("time") < min_follow_up_days) & (~pl.col("event"))
+        )
+        short_events = dataset.filter(
+            (pl.col("time") < min_follow_up_days) & (pl.col("event"))
+        )
+        if short_censored.height > 0:
+            cases = short_censored["case_id"].unique().to_list()
+            print(
+                f"survival_dataset: usunięto {short_censored.height} cenzurowanych "
+                f"próbek z time < {min_follow_up_days} dni ({len(cases)} pacjentów). "
+                f"Krótkie cenzury = utracone obserwacje bez informacji o przeżyciu. "
+                f"Przykłady: {cases[:3]}",
+                file=sys.stderr,
+            )
+        if short_events.height > 0:
+            cases = short_events["case_id"].unique().to_list()
+            print(
+                f"survival_dataset: ZACHOWANO {short_events.height} próbek ze "
+                f"zdarzeniem i time < {min_follow_up_days} dni ({len(cases)} pacjentów). "
+                f"Wczesne zgony to realny sygnał przeżyciowy, nie szum. "
+                f"Przykłady: {cases[:3]}",
+                file=sys.stderr,
+            )
+        dataset = dataset.filter(
+            ~((pl.col("time") < min_follow_up_days) & (~pl.col("event")))
+        )
+
+        if dataset.height == 0:
+            raise SurvivalDatasetError(
+                f"Po filtrze krótkich cenzur (min_follow_up_days={min_follow_up_days}) "
                 f"nie pozostała żadna próbka"
             )
 

@@ -13,4 +13,5 @@ survival:
   time_column: "days_to_last_follow_up"
   event_column: "vital_status"
   event_positive_value: "Dead"
-  min_follow_up_days: 30
+  min_follow_up_days: 30        # usuwa krótkie CENZURY; wczesne zgony zachowane
+  drop_zero_time: true          # usuwa artefakty time<=0 (zaokrąglenie daty PHI)

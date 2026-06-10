@@ -368,9 +368,9 @@ def build_survival(
     config: Optional[Path] = typer.Option(
         None,
         "--config",
-        help="Plik YAML z parametrami pipeline'u. "
-             "Używane pola: survival.min_follow_up_days (filtr próbek o krótkim "
-             "czasie obserwacji).",
+        help="Plik YAML z parametrami pipeline'u. Używane pola: "
+             "survival.min_follow_up_days (usuwa krótkie cenzury, zachowuje wczesne "
+             "zgony), survival.drop_zero_time (usuwa artefakty time<=0).",
     ),
 ) -> None:
     """Buduje zbiór do analizy przeżywalności z macierzy ekspresji i danych klinicznych."""
@@ -440,6 +440,22 @@ def build_survival(
             )
             raise typer.Exit(code=1) from exc
 
+    drop_zero_time = True
+    cfg_drop_zero = get_nested(cfg, "survival", "drop_zero_time")
+    if cfg_drop_zero is not None:
+        if not isinstance(cfg_drop_zero, bool):
+            typer.secho(
+                f"Niepoprawna wartość survival.drop_zero_time w configu: "
+                f"{cfg_drop_zero!r} (oczekiwany bool true/false)",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        drop_zero_time = cfg_drop_zero
+        typer.secho(
+            f"Filtr drop_zero_time z configu: {drop_zero_time}",
+            fg=typer.colors.CYAN,
+        )
+
     try:
         dataset = build_survival_dataset(
             expression_matrix=matrix,
@@ -447,6 +463,7 @@ def build_survival(
             clinical=clinical_df,
             tumor_only=tumor_only,
             min_follow_up_days=min_follow_up_days,
+            drop_zero_time=drop_zero_time,
         )
     except SurvivalDatasetError as exc:
         typer.secho(f"Błąd budowania zbioru: {exc}", fg=typer.colors.RED)
