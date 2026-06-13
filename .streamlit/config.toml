@@ -1,0 +1,13 @@
+[theme]
+# Paleta LUAD-HUBA: beż / brąz / zieleń (klimat lab/medical)
+# Spójna z notebookami (PALETTE: primary zieleń, secondary brąz, accent beż)
+primaryColor = "#5a8b3c"              # zieleń - akcent główny (przyciski, aktywne)
+backgroundColor = "#faf8f4"           # bardzo jasny beż - tło główne
+secondaryBackgroundColor = "#ede5d8"  # beż - tło sidebara i kart
+textColor = "#2a2a26"                 # ciemny grafit - tekst
+font = "sans serif"
+
+[server]
+# Sensowne defaulty dla lokalnego uruchomienia
+headless = true
+runOnSave = true
