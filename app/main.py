@@ -17,6 +17,15 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# --- Funkcje pipeline'u z src/ (wołane bezpośrednio) ---
+from src.ingest.file_naming import STAR_FILE_PATTERNS, STAR_FILE_SUFFIXES
+from src.ingest.star_parser import StarParserError, parse_star_counts
+from src.ingest.sample_sheet_parser import parse_sample_sheet
+from src.ingest.clinical_parser import parse_clinical
+from src.transform.expression_matrix import build_expression_matrix
+from src.transform.survival_dataset import build_survival_dataset
+from src.cli_config import load_config, get_nested, resolve_metric, ConfigError
+
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
@@ -201,22 +210,251 @@ def render_config(state: dict) -> None:
         st.code(CONFIG_PATH.read_text(encoding="utf-8"), language="yaml")
 
 
+def _discover_star_files(input_dir: Path) -> list[Path]:
+    """Wyszukuje rekurencyjnie surowe pliki STAR-Counts (jak CLI)."""
+    found: set[Path] = set()
+    if input_dir.exists():
+        for pattern in STAR_FILE_PATTERNS:
+            found.update(input_dir.rglob(pattern))
+    return sorted(found)
+
+
+def _output_stem(path: Path) -> str:
+    """Buduje nazwę pliku wyjściowego niezależnie od konwencji (jak CLI)."""
+    name = path.name
+    for suffix in STAR_FILE_SUFFIXES:
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
+    return path.stem
+
+
+def _find_sample_sheet() -> Path | None:
+    sheets = sorted(DATA_RAW.glob("gdc_sample_sheet*.tsv"))
+    return sheets[0] if sheets else None
+
+
+def render_parse(state: dict) -> None:
+    """Parsowanie surowych plików STAR-Counts (TSV) do parquet."""
+    st.header("Parsowanie plików STAR-Counts")
+    st.caption("Konwersja surowych plików STAR-Counts (TSV) do formatu parquet.")
+
+    star_files = _discover_star_files(DATA_RAW)
+
+    if not star_files:
+        st.warning(
+            "Nie znaleziono surowych plików STAR-Counts w `data/raw/`.\n\n"
+            "Pliki STAR (`*.rna_seq.augmented_star_gene_counts.tsv`) są pobierane "
+            "przez etap **Pobieranie** do podkatalogów `data/raw/`. Jeśli zostały "
+            "już sparsowane i usunięte, użyj gotowych parquetów w `data/interim/star_counts/`."
+        )
+        if state["parsed"]:
+            st.info(f"W `data/interim/star_counts/` jest już **{state['parsed_count']}** "
+                    "sparsowanych parquetów. Możesz przejść do etapu Macierz ekspresji.")
+        return
+
+    st.write(f"Znaleziono **{len(star_files)}** surowych plików STAR-Counts.")
+    if state["parsed"]:
+        st.info(f"Uwaga: w `data/interim/` jest już {state['parsed_count']} parquetów. "
+                "Ponowne parsowanie nadpisze istniejące pliki.")
+
+    DATA_INTERIM.mkdir(parents=True, exist_ok=True)
+
+    if st.button("Rozpocznij parsowanie", type="primary"):
+        progress = st.progress(0.0, text="Parsowanie...")
+        status = st.empty()
+        errors = []
+        total = len(star_files)
+
+        for i, path in enumerate(star_files, start=1):
+            try:
+                df = parse_star_counts(path)
+                out_path = DATA_INTERIM / f"{_output_stem(path)}.parquet"
+                df.write_parquet(out_path)
+            except (StarParserError, FileNotFoundError) as exc:
+                errors.append(f"{path.name}: {exc}")
+            progress.progress(i / total, text=f"Przetworzono {i}/{total} plików")
+            if i % 25 == 0 or i == total:
+                status.caption(f"Ostatni: {path.name}")
+
+        if errors:
+            st.error(f"Zakończono z {len(errors)} błędami:")
+            with st.expander("Szczegóły błędów"):
+                for e in errors:
+                    st.text(e)
+        else:
+            st.success(f"Sparsowano {total} plików do `data/interim/star_counts/`.")
+        st.rerun()
+
+
+def render_build_matrix(state: dict) -> None:
+    """Budowa macierzy ekspresji z parquetów (z progress barem)."""
+    st.header("Budowa macierzy ekspresji")
+    st.caption("Łączenie sparsowanych parquetów w macierz geny × próbki, z filtrem biotype.")
+
+    if not state["parsed"]:
+        st.warning("Brak sparsowanych parquetów. Najpierw uruchom etap Parsowanie.")
+        return
+
+    sheet_path = _find_sample_sheet()
+    if sheet_path is None:
+        st.error("Brak sample sheet (`gdc_sample_sheet*.tsv`) w `data/raw/`.")
+        return
+
+    # Wczytaj config dla domyślnych wartości
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except ConfigError:
+            cfg = {}
+
+    norm = cfg.get("normalization", {}) if isinstance(cfg, dict) else {}
+    default_metric = norm.get("method", "tpm")
+    default_biotype = norm.get("biotype_filter", "protein_coding")
+
+    st.write(f"Parquetów do połączenia: **{state['parsed_count']}**")
+
+    col1, col2 = st.columns(2)
+    metric_choice = col1.selectbox(
+        "Metryka ekspresji",
+        options=["tpm", "log2cpm", "unstranded", "fpkm"],
+        index=0 if default_metric == "tpm" else 0,
+        help="Z konfiguracji: " + str(default_metric),
+    )
+    dup_strategy = col2.selectbox(
+        "Strategia duplikatów",
+        options=["deepest", "first", "fail"],
+        index=0,
+        help="deepest = wybierz aliquot z największą sumą ekspresji (zalecane dla TCGA).",
+    )
+    biotype = st.text_input(
+        "Filtr biotype",
+        value=default_biotype or "",
+        help="np. protein_coding (zatrzymuje ~33% genów). Puste = wszystkie geny.",
+    )
+
+    if state["matrix_built"]:
+        st.info("Macierz już istnieje — ponowne budowanie ją nadpisze.")
+
+    if st.button("Zbuduj macierz", type="primary"):
+        try:
+            sheet_df = parse_sample_sheet(sheet_path)
+        except Exception as exc:
+            st.error(f"Błąd wczytania sample sheet: {exc}")
+            return
+
+        parquet_paths = sorted(DATA_INTERIM.glob("*.parquet"))
+        metric_resolved = resolve_metric(metric_choice) if metric_choice else "tpm_unstranded"
+
+        progress = st.progress(0.0, text="Budowanie macierzy...")
+
+        def cb(done: int, total: int) -> None:
+            progress.progress(done / total, text=f"Połączono {done}/{total} próbek")
+
+        try:
+            with st.spinner("Wczytywanie i łączenie parquetów..."):
+                matrix = build_expression_matrix(
+                    parquet_paths,
+                    sheet_df,
+                    metric=metric_resolved,
+                    duplicate_strategy=dup_strategy,
+                    biotype_filter=biotype if biotype.strip() else None,
+                    progress_callback=cb,
+                )
+            DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+            out_path = DATA_PROCESSED / "expression_matrix.parquet"
+            matrix.write_parquet(out_path)
+            n_genes = matrix.height
+            n_samples = matrix.width - 1
+            st.success(f"Macierz zbudowana: **{n_genes} genów × {n_samples} próbek**. "
+                       f"Zapisano do `data/processed/expression_matrix.parquet`.")
+        except Exception as exc:
+            st.error(f"Błąd budowy macierzy: {exc}")
+            return
+        st.rerun()
+
+
+def render_build_survival(state: dict) -> None:
+    """Budowa zbioru przeżywalności (integracja macierz + clinical)."""
+    st.header("Budowa zbioru przeżywalności")
+    st.caption("Integracja macierzy ekspresji z danymi klinicznymi i filtrami warunkowymi.")
+
+    if not state["matrix_built"]:
+        st.warning("Brak macierzy ekspresji. Najpierw uruchom etap Macierz ekspresji.")
+        return
+
+    sheet_path = _find_sample_sheet()
+    clinical_path = DATA_RAW / "clinical.tsv"
+    if sheet_path is None or not clinical_path.exists():
+        st.error("Brak sample sheet lub `clinical.tsv` w `data/raw/`.")
+        return
+
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except ConfigError:
+            cfg = {}
+    surv = cfg.get("survival", {}) if isinstance(cfg, dict) else {}
+    default_min_follow = int(surv.get("min_follow_up_days", 30))
+    default_drop_zero = bool(surv.get("drop_zero_time", True))
+
+    col1, col2 = st.columns(2)
+    tumor_only = col1.checkbox("Tylko próbki nowotworowe", value=True,
+                               help="Wyklucza próbki normalne (tissue normal).")
+    drop_zero = col2.checkbox("Usuń artefakty time<=0", value=default_drop_zero,
+                              help="Usuwa próbki z czasem <=0 (artefakt PHI).")
+    min_follow = st.number_input(
+        "Min follow-up (dni)", min_value=0, value=default_min_follow,
+        help="Usuwa krótkie cenzury. Wczesne zgony są zachowane.",
+    )
+
+    if state["survival_built"]:
+        st.info("Zbiór przeżywalności już istnieje — ponowne budowanie go nadpisze.")
+
+    if st.button("Zbuduj zbiór przeżywalności", type="primary"):
+        try:
+            with st.spinner("Wczytywanie danych..."):
+                matrix = pl.read_parquet(DATA_PROCESSED / "expression_matrix.parquet")
+                sheet_df = parse_sample_sheet(sheet_path)
+                clinical_df = parse_clinical(clinical_path)
+
+            with st.spinner("Integracja i filtrowanie..."):
+                dataset = build_survival_dataset(
+                    matrix,
+                    sheet_df,
+                    clinical_df,
+                    tumor_only=tumor_only,
+                    min_follow_up_days=int(min_follow),
+                    drop_zero_time=drop_zero,
+                )
+            DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+            out_path = DATA_PROCESSED / "survival_dataset.parquet"
+            dataset.write_parquet(out_path)
+
+            n_samples = dataset.height
+            n_events = int(dataset["event"].sum()) if "event" in dataset.columns else 0
+            censoring = (1 - n_events / n_samples) * 100 if n_samples else 0
+            st.success(f"Zbiór zbudowany: **{n_samples} próbek**, "
+                       f"zdarzenia: {n_events}, cenzurowanie: {censoring:.1f}%. "
+                       f"Zapisano do `data/processed/survival_dataset.parquet`.")
+        except Exception as exc:
+            st.error(f"Błąd budowy zbioru: {exc}")
+            return
+        st.rerun()
+
+
 def render_placeholder(stage: dict, state: dict) -> None:
     """Tymczasowa treść dla sekcji jeszcze niezaimplementowanych."""
     st.header(f"{stage['label']}")
     st.info(
-        f"Sekcja **{stage['label']}** zostanie zaimplementowana w kolejnej sesji.\n\n"
-        "Sesja 1 obejmuje fundament (nawigacja, stan, wymuszanie kolejności) "
-        "oraz sekcje Przeglądanie i Konfiguracja."
+        f"Sekcja **{stage['label']}** zostanie zaimplementowana w kolejnej sesji."
     )
     # Krótki opis co tu będzie
     descriptions = {
         "download": "Pobranie danych TCGA-LUAD z GDC API (manifest, pliki STAR, clinical).",
         "upload": "Ręczne wgranie plików STAR-Counts i clinical.tsv.",
-        "parse": "Parsowanie plików STAR-Counts (TSV) do formatu parquet.",
         "validate": "Kontrola jakości kohorty (QC) i raport.",
-        "build_matrix": "Budowa macierzy ekspresji (geny × próbki) z filtrem biotype.",
-        "build_survival": "Budowa zbioru do analizy przeżywalności (z filtrami warunkowymi).",
     }
     if stage["id"] in descriptions:
         st.caption(descriptions[stage["id"]])
@@ -285,6 +523,12 @@ def main() -> None:
         render_browse(state)
     elif active_stage["id"] == "config":
         render_config(state)
+    elif active_stage["id"] == "parse":
+        render_parse(state)
+    elif active_stage["id"] == "build_matrix":
+        render_build_matrix(state)
+    elif active_stage["id"] == "build_survival":
+        render_build_survival(state)
     else:
         render_placeholder(active_stage, state)
 

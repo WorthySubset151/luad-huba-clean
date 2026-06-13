@@ -5,6 +5,7 @@ __author__ = "Łukasz Połaski"
 import hashlib
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def build_expression_matrix(
     metric: str = "unstranded",
     duplicate_strategy: str = "fail",
     biotype_filter: str | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> pl.DataFrame:
     """Łączy pliki Parquet z parsowanych STAR-Counts w jedną macierz ekspresji.
 
@@ -118,7 +120,11 @@ def build_expression_matrix(
     reference_genes = first_df["gene_id"]
     matrix = first_df.rename({metric: sample_ids[0]})
 
-    for path, sample_id in zip(parquet_paths[1:], sample_ids[1:]):
+    total_files = len(parquet_paths)
+    if progress_callback is not None:
+        progress_callback(1, total_files)
+
+    for idx, (path, sample_id) in enumerate(zip(parquet_paths[1:], sample_ids[1:]), start=2):
         df = _read_and_validate_parquet(path, metric)
         if not df["gene_id"].equals(reference_genes):
             raise ExpressionMatrixError(
@@ -126,6 +132,8 @@ def build_expression_matrix(
                 f"(różna kolejność lub zawartość genów)"
             )
         matrix = matrix.with_columns(df[metric].alias(sample_id))
+        if progress_callback is not None:
+            progress_callback(idx, total_files)
 
     null_columns = [c for c in matrix.columns if matrix[c].null_count() > 0]
     if null_columns:
