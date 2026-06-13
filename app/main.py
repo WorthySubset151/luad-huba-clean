@@ -161,11 +161,13 @@ def render_config(state: dict) -> None:
 
     st.subheader("Normalizacja")
     norm = cfg.get("normalization", {})
+    metric_options = ["tpm", "unstranded", "fpkm", "fpkm_uq", "counts"]
+    current_method = norm.get("method", "tpm")
     method = st.selectbox(
         "Metryka (normalization.method)",
-        options=["tpm", "log2cpm"],
-        index=["tpm", "log2cpm"].index(norm.get("method", "tpm"))
-        if norm.get("method") in ("tpm", "log2cpm") else 0,
+        options=metric_options,
+        index=metric_options.index(current_method) if current_method in metric_options else 0,
+        help="Aliasy akceptowane przez pipeline. tpm/fpkm znormalizowane, counts/unstranded surowe.",
     )
     biotype = st.text_input(
         "Filtr biotype (normalization.biotype_filter)",
@@ -259,6 +261,11 @@ def render_parse(state: dict) -> None:
 
     DATA_INTERIM.mkdir(parents=True, exist_ok=True)
 
+    # Pokaż wynik z poprzedniego uruchomienia (przetrwał rerun)
+    if st.session_state.get("parse_result"):
+        st.success(st.session_state.parse_result)
+        st.session_state.parse_result = None
+
     if st.button("Rozpocznij parsowanie", type="primary"):
         progress = st.progress(0.0, text="Parsowanie...")
         status = st.empty()
@@ -282,8 +289,10 @@ def render_parse(state: dict) -> None:
                 for e in errors:
                     st.text(e)
         else:
-            st.success(f"Sparsowano {total} plików do `data/interim/star_counts/`.")
-        st.rerun()
+            st.session_state.parse_result = (
+                f"Sparsowano {total} plików do data/interim/star_counts/."
+            )
+            st.rerun()
 
 
 def render_build_matrix(state: dict) -> None:
@@ -317,9 +326,9 @@ def render_build_matrix(state: dict) -> None:
     col1, col2 = st.columns(2)
     metric_choice = col1.selectbox(
         "Metryka ekspresji",
-        options=["tpm", "log2cpm", "unstranded", "fpkm"],
-        index=0 if default_metric == "tpm" else 0,
-        help="Z konfiguracji: " + str(default_metric),
+        options=["tpm", "unstranded", "fpkm", "fpkm_uq", "counts"],
+        index=0,
+        help="Z konfiguracji: " + str(default_metric) + ". tpm/fpkm znormalizowane, counts/unstranded surowe.",
     )
     dup_strategy = col2.selectbox(
         "Strategia duplikatów",
@@ -336,6 +345,11 @@ def render_build_matrix(state: dict) -> None:
     if state["matrix_built"]:
         st.info("Macierz już istnieje — ponowne budowanie ją nadpisze.")
 
+    # Pokaż wynik z poprzedniego uruchomienia (przetrwał rerun)
+    if st.session_state.get("matrix_result"):
+        st.success(st.session_state.matrix_result)
+        st.session_state.matrix_result = None
+
     if st.button("Zbuduj macierz", type="primary"):
         try:
             sheet_df = parse_sample_sheet(sheet_path)
@@ -344,7 +358,11 @@ def render_build_matrix(state: dict) -> None:
             return
 
         parquet_paths = sorted(DATA_INTERIM.glob("*.parquet"))
-        metric_resolved = resolve_metric(metric_choice) if metric_choice else "tpm_unstranded"
+        try:
+            metric_resolved = resolve_metric(metric_choice) if metric_choice else "tpm_unstranded"
+        except ConfigError as exc:
+            st.error(f"Niepoprawna metryka: {exc}")
+            return
 
         progress = st.progress(0.0, text="Budowanie macierzy...")
 
@@ -352,24 +370,28 @@ def render_build_matrix(state: dict) -> None:
             progress.progress(done / total, text=f"Połączono {done}/{total} próbek")
 
         try:
-            with st.spinner("Wczytywanie i łączenie parquetów..."):
-                matrix = build_expression_matrix(
-                    parquet_paths,
-                    sheet_df,
-                    metric=metric_resolved,
-                    duplicate_strategy=dup_strategy,
-                    biotype_filter=biotype if biotype.strip() else None,
-                    progress_callback=cb,
-                )
+            matrix = build_expression_matrix(
+                parquet_paths,
+                sheet_df,
+                metric=metric_resolved,
+                duplicate_strategy=dup_strategy,
+                biotype_filter=biotype if biotype.strip() else None,
+                progress_callback=cb,
+            )
             DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
             out_path = DATA_PROCESSED / "expression_matrix.parquet"
             matrix.write_parquet(out_path)
             n_genes = matrix.height
             n_samples = matrix.width - 1
-            st.success(f"Macierz zbudowana: **{n_genes} genów × {n_samples} próbek**. "
-                       f"Zapisano do `data/processed/expression_matrix.parquet`.")
+            st.session_state.matrix_result = (
+                f"Macierz zbudowana: {n_genes} genów × {n_samples} próbek. "
+                f"Zapisano do data/processed/expression_matrix.parquet."
+            )
         except Exception as exc:
-            st.error(f"Błąd budowy macierzy: {exc}")
+            st.error(f"Błąd budowy macierzy: {type(exc).__name__}: {exc}")
+            import traceback
+            with st.expander("Szczegóły błędu"):
+                st.code(traceback.format_exc())
             return
         st.rerun()
 
@@ -412,14 +434,19 @@ def render_build_survival(state: dict) -> None:
     if state["survival_built"]:
         st.info("Zbiór przeżywalności już istnieje — ponowne budowanie go nadpisze.")
 
+    # Pokaż wynik z poprzedniego uruchomienia (przetrwał rerun)
+    if st.session_state.get("survival_result"):
+        st.success(st.session_state.survival_result)
+        st.session_state.survival_result = None
+
     if st.button("Zbuduj zbiór przeżywalności", type="primary"):
         try:
-            with st.spinner("Wczytywanie danych..."):
+            with st.spinner("Wczytywanie danych (macierz, sample sheet, clinical)..."):
                 matrix = pl.read_parquet(DATA_PROCESSED / "expression_matrix.parquet")
                 sheet_df = parse_sample_sheet(sheet_path)
                 clinical_df = parse_clinical(clinical_path)
 
-            with st.spinner("Integracja i filtrowanie..."):
+            with st.spinner("Integracja i filtrowanie warunkowe..."):
                 dataset = build_survival_dataset(
                     matrix,
                     sheet_df,
@@ -435,11 +462,16 @@ def render_build_survival(state: dict) -> None:
             n_samples = dataset.height
             n_events = int(dataset["event"].sum()) if "event" in dataset.columns else 0
             censoring = (1 - n_events / n_samples) * 100 if n_samples else 0
-            st.success(f"Zbiór zbudowany: **{n_samples} próbek**, "
-                       f"zdarzenia: {n_events}, cenzurowanie: {censoring:.1f}%. "
-                       f"Zapisano do `data/processed/survival_dataset.parquet`.")
+            st.session_state.survival_result = (
+                f"Zbiór zbudowany: {n_samples} próbek, zdarzenia: {n_events}, "
+                f"cenzurowanie: {censoring:.1f}%. "
+                f"Zapisano do data/processed/survival_dataset.parquet."
+            )
         except Exception as exc:
-            st.error(f"Błąd budowy zbioru: {exc}")
+            st.error(f"Błąd budowy zbioru: {type(exc).__name__}: {exc}")
+            import traceback
+            with st.expander("Szczegóły błędu"):
+                st.code(traceback.format_exc())
             return
         st.rerun()
 
