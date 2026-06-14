@@ -25,6 +25,8 @@ from src.ingest.clinical_parser import parse_clinical
 from src.transform.expression_matrix import build_expression_matrix
 from src.transform.survival_dataset import build_survival_dataset
 from src.cli_config import load_config, get_nested, resolve_metric, ConfigError
+from src.validate.runner import run_cohort_qc, discover_stems, save_qc_report
+from src.validate.qc_result import Severity, QCCategory
 
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
@@ -476,6 +478,108 @@ def render_build_survival(state: dict) -> None:
         st.rerun()
 
 
+def render_validate(state: dict) -> None:
+    """Walidacja spójności kohorty (QC) z raportem."""
+    st.header("Walidacja kohorty")
+    st.caption("Kontrola spójności: dopasowanie próbek do plików STAR, danych klinicznych, duplikaty.")
+
+    if not state["parsed"]:
+        st.warning("Brak sparsowanych parquetów. Najpierw uruchom etap Parsowanie.")
+        return
+
+    sheet_path = _find_sample_sheet()
+    clinical_path = DATA_RAW / "clinical.tsv"
+    if sheet_path is None:
+        st.error("Brak sample sheet (`gdc_sample_sheet*.tsv`) w `data/raw/`.")
+        return
+    if not clinical_path.exists():
+        st.error("Brak pliku `clinical.tsv` w `data/raw/`.")
+        return
+
+    st.write(f"Parquetów do sprawdzenia: **{state['parsed_count']}**")
+
+    # Pokaż raport z poprzedniego uruchomienia (przetrwał rerun)
+    if st.session_state.get("qc_summary"):
+        _render_qc_report(st.session_state.qc_summary, st.session_state.get("qc_issues", []))
+
+    if st.button("Uruchom walidację", type="primary"):
+        try:
+            with st.spinner("Wczytywanie metadanych i sprawdzanie spójności..."):
+                sheet_df = parse_sample_sheet(sheet_path)
+                clinical_df = parse_clinical(clinical_path)
+                available_stems = discover_stems(DATA_INTERIM)
+                report = run_cohort_qc(sheet_df, clinical_df, available_stems)
+                log_path = save_qc_report(report, PROJECT_ROOT / "logs" / "qc")
+
+            # Zapis do session_state (struktura serializowalna)
+            st.session_state.qc_summary = report.summary()
+            st.session_state.qc_issues = [
+                {
+                    "severity": i.severity.value,
+                    "category": i.category.value,
+                    "message": i.message,
+                    "context": i.context,
+                }
+                for i in report.issues
+            ]
+            st.session_state.qc_log_path = str(log_path)
+        except Exception as exc:
+            st.error(f"Błąd walidacji: {type(exc).__name__}: {exc}")
+            import traceback
+            with st.expander("Szczegóły błędu"):
+                st.code(traceback.format_exc())
+            return
+        st.rerun()
+
+
+def _render_qc_report(summary: dict, issues: list) -> None:
+    """Renderuje raport QC: podsumowanie + lista problemów per istotność."""
+    # Podsumowanie liczbowe
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Wszystkie", summary["total"])
+    c2.metric("Błędy", summary["errors"])
+    c3.metric("Ostrzeżenia", summary["warnings"])
+    c4.metric("Info", summary["info"])
+
+    # Ogólny werdykt
+    if summary["errors"] == 0:
+        st.success("Kohorta przeszła walidację — brak błędów krytycznych.")
+    else:
+        st.error(f"Wykryto {summary['errors']} błędów krytycznych — wymagają uwagi.")
+
+    log_path = st.session_state.get("qc_log_path")
+    if log_path:
+        st.caption(f"Raport JSON zapisany: `{log_path}`")
+
+    if not issues:
+        st.info("Brak problemów do wyświetlenia — kohorta w pełni spójna.")
+        return
+
+    # Etykiety kategorii po polsku
+    category_labels = {
+        "missing_star_file": "Brakujący plik STAR",
+        "orphan_star_file": "Osierocony plik STAR (bez próbki)",
+        "missing_clinical": "Brak danych klinicznych",
+        "duplicate_sample": "Duplikat próbki",
+        "missing_survival": "Brak danych przeżycia",
+    }
+
+    # Grupowanie po istotności
+    for sev, label, icon in [("error", "Błędy", "🔴"),
+                             ("warning", "Ostrzeżenia", "🟡"),
+                             ("info", "Informacje", "🔵")]:
+        sev_issues = [i for i in issues if i["severity"] == sev]
+        if not sev_issues:
+            continue
+        with st.expander(f"{icon} {label} ({len(sev_issues)})", expanded=(sev == "error")):
+            for issue in sev_issues:
+                cat = category_labels.get(issue["category"], issue["category"])
+                st.markdown(f"**{cat}** — {issue['message']}")
+                if issue.get("context"):
+                    ctx_preview = {k: v for k, v in list(issue["context"].items())[:3]}
+                    st.caption(f"Kontekst: {ctx_preview}")
+
+
 def render_placeholder(stage: dict, state: dict) -> None:
     """Tymczasowa treść dla sekcji jeszcze niezaimplementowanych."""
     st.header(f"{stage['label']}")
@@ -486,7 +590,6 @@ def render_placeholder(stage: dict, state: dict) -> None:
     descriptions = {
         "download": "Pobranie danych TCGA-LUAD z GDC API (manifest, pliki STAR, clinical).",
         "upload": "Ręczne wgranie plików STAR-Counts i clinical.tsv.",
-        "validate": "Kontrola jakości kohorty (QC) i raport.",
     }
     if stage["id"] in descriptions:
         st.caption(descriptions[stage["id"]])
@@ -561,6 +664,8 @@ def main() -> None:
         render_build_matrix(state)
     elif active_stage["id"] == "build_survival":
         render_build_survival(state)
+    elif active_stage["id"] == "validate":
+        render_validate(state)
     else:
         render_placeholder(active_stage, state)
 
