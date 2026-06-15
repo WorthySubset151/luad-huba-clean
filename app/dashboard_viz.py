@@ -331,6 +331,71 @@ def km_single_gene(ds, pdf, gene_symbol: str, ensg: str) -> tuple[go.Figure, dic
     return fig, {"p_value": p_value, "median_expr": float(median)}
 
 
+def km_multi_gene(ds, pdf, genes: list[tuple[str, str]]) -> tuple[go.Figure, list]:
+    """Porównuje wiele genów na jednym wykresie KM.
+
+    Dla każdego genu rysuje krzywą grupy "high" (ekspresja >= mediana),
+    pozwalając wizualnie porównać prognostyczny efekt różnych genów.
+    Zwraca też tabelę log-rank (high vs low) per gen.
+
+    Argumenty:
+        genes: lista par (symbol, ensg) genów do porównania.
+    """
+    pdf = _ensure_time_years(pdf)
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+
+    # Paleta dla wielu genów (cyklicznie)
+    multi_colors = [
+        PALETTE["primary"], PALETTE["secondary"], "#a8a030",
+        "#3c6a8b", "#8b3c6a", "#6a8b3c", "#c4844a",
+    ]
+
+    fig = go.Figure()
+    results = []
+    color_idx = 0
+
+    for symbol, ensg in genes:
+        col = find_gene_col(ensg, gene_cols)
+        if col is None:
+            results.append({"gene": symbol, "p_value": None, "note": "brak w macierzy"})
+            continue
+
+        expr = ds[col].to_numpy().astype(float)
+        median = np.median(expr)
+        high_mask = (expr >= median)
+        low_mask = (expr < median)
+
+        color = multi_colors[color_idx % len(multi_colors)]
+        color_idx += 1
+
+        # Rysujemy tylko krzywą "high" (porównanie efektu między genami)
+        kmf = KaplanMeierFitter()
+        kmf.fit(pdf["time_years"][high_mask], pdf["event"][high_mask], label=f"{symbol} high")
+        sf = kmf.survival_function_
+        n_high = int(high_mask.sum())
+        fig.add_trace(go.Scatter(
+            x=sf.index.values, y=sf.iloc[:, 0].values, mode="lines",
+            name=f"{symbol} high (n={n_high})",
+            line=dict(color=color, width=2.5, shape="hv"),
+            hovertemplate=f"{symbol}: %{{y:.2f}}<extra></extra>",
+        ))
+
+        # Log-rank high vs low dla tego genu
+        p_value = None
+        try:
+            res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
+                               pdf["event"][high_mask], pdf["event"][low_mask])
+            p_value = float(res.p_value)
+        except Exception:
+            pass
+        results.append({"gene": symbol, "p_value": p_value, "note": ""})
+
+    _layout(fig, "Kaplan-Meier — porównanie genów (krzywe grup „high”)",
+            "Czas (lata)", "Prawdopodobieństwo przeżycia")
+    fig.update_yaxes(range=[0, 1.02])
+    return fig, results
+
+
 # =====================================================================
 #  WYKRESY EKSPRESJI
 # =====================================================================

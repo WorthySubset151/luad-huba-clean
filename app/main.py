@@ -780,6 +780,42 @@ def render_dashboard(state: dict) -> None:
                 except Exception as exc:
                     st.error(f"Błąd wykresu genu: {exc}")
 
+        st.divider()
+        st.subheader("Kaplan-Meier — porównanie wielu genów")
+        st.caption("Wybierz kilka genów, by porównać prognostyczny efekt ich "
+                   "wysokiej ekspresji (krzywe grup „high”) na jednym wykresie.")
+        multi_options = list(viz.LUAD_MARKERS.keys()) + [
+            g for g in viz.SIGNATURE_PANEL.keys() if g not in viz.LUAD_MARKERS
+        ]
+        default_multi = [g for g in ["NKX2-1", "MKI67", "BIRC5"] if g in multi_options]
+        selected_multi = st.multiselect(
+            "Geny do porównania (2-7)", options=sorted(set(multi_options)),
+            default=default_multi, max_selections=7,
+        )
+        if len(selected_multi) >= 2:
+            genes_pairs = []
+            for g in selected_multi:
+                ensg = viz.LUAD_MARKERS.get(g) or viz.SIGNATURE_PANEL.get(g, (None,))[0]
+                if ensg:
+                    genes_pairs.append((g, ensg))
+            try:
+                fig, results = viz.km_multi_gene(ds, pdf, genes_pairs)
+                st.plotly_chart(fig, use_container_width=True)
+                # Tabela log-rank per gen
+                rows = []
+                for r in results:
+                    if r["p_value"] is not None:
+                        sig = "istotne" if r["p_value"] < 0.05 else "nieistotne"
+                        rows.append({"Gen": r["gene"], "Log-rank p (high vs low)": f"{r['p_value']:.4f}", "Ocena": sig})
+                    else:
+                        rows.append({"Gen": r["gene"], "Log-rank p (high vs low)": "—", "Ocena": r.get("note", "")})
+                if rows:
+                    st.dataframe(rows, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Błąd wykresu porównania: {exc}")
+        elif len(selected_multi) == 1:
+            st.info("Wybierz co najmniej 2 geny do porównania.")
+
     # ===== ZAKŁADKA EKSPRESJA =====
     with tab_expr:
         # Macierz ekspresji (osobny plik - większy)
@@ -823,6 +859,110 @@ def render_dashboard(state: dict) -> None:
                     st.error(f"Błąd wykresu markerów: {exc}")
 
 
+def render_upload(state: dict) -> None:
+    """Ręczne wgrywanie plików do data/raw/ (alternatywa dla Pobierania)."""
+    st.header("Wgrywanie plików")
+    st.caption("Wgraj ręcznie pliki kohorty zamiast pobierać je z GDC. "
+               "Pliki trafiają do `data/raw/`.")
+
+    st.markdown(
+        "Pipeline potrzebuje trzech rodzajów plików:\n"
+        "- **clinical.tsv** — dane kliniczne (czas obserwacji, status, kowarianty)\n"
+        "- **gdc_sample_sheet** — arkusz próbek (mapowanie plik → próbka → pacjent)\n"
+        "- **pliki STAR-Counts** — surowe zliczenia ekspresji (jeden plik per próbka)"
+    )
+
+    DATA_RAW.mkdir(parents=True, exist_ok=True)
+
+    # Pokaż feedback z poprzedniego wgrania (przetrwa rerun)
+    if st.session_state.get("upload_feedback"):
+        for msg in st.session_state.upload_feedback:
+            st.success(msg)
+        st.session_state.upload_feedback = []
+
+    st.divider()
+
+    # --- Dane kliniczne ---
+    st.subheader("Dane kliniczne")
+    clinical_file = st.file_uploader("clinical.tsv", type=["tsv", "txt"], key="up_clinical")
+    if clinical_file is not None:
+        if st.button("Zapisz clinical.tsv", key="btn_clinical"):
+            target = DATA_RAW / "clinical.tsv"
+            try:
+                target.write_bytes(clinical_file.getvalue())
+                st.session_state.upload_feedback = [f"Zapisano: {target.name} ({clinical_file.size} B)"]
+            except Exception as exc:
+                st.error(f"Błąd zapisu: {exc}")
+                return
+            st.rerun()
+
+    # --- Sample sheet ---
+    st.subheader("Arkusz próbek (sample sheet)")
+    sheet_file = st.file_uploader("gdc_sample_sheet*.tsv", type=["tsv", "txt"], key="up_sheet")
+    if sheet_file is not None:
+        if st.button("Zapisz sample sheet", key="btn_sheet"):
+            # zachowujemy oryginalną nazwę jeśli pasuje do wzorca, inaczej standaryzujemy
+            fname = sheet_file.name
+            if not fname.startswith("gdc_sample_sheet"):
+                fname = "gdc_sample_sheet.tsv"
+            target = DATA_RAW / fname
+            try:
+                target.write_bytes(sheet_file.getvalue())
+                st.session_state.upload_feedback = [f"Zapisano: {target.name} ({sheet_file.size} B)"]
+            except Exception as exc:
+                st.error(f"Błąd zapisu: {exc}")
+                return
+            st.rerun()
+
+    # --- Pliki STAR (wiele naraz) ---
+    st.subheader("Pliki STAR-Counts")
+    st.caption("Można wgrać wiele plików jednocześnie. Trafią do podkatalogu w `data/raw/`.")
+    star_files = st.file_uploader(
+        "Pliki *.rna_seq.augmented_star_gene_counts.tsv",
+        type=["tsv", "txt"], accept_multiple_files=True, key="up_star",
+    )
+    if star_files:
+        st.write(f"Wybrano plików: **{len(star_files)}**")
+        if st.button(f"Zapisz {len(star_files)} plików STAR", key="btn_star"):
+            star_dir = DATA_RAW / "uploaded_star"
+            star_dir.mkdir(parents=True, exist_ok=True)
+            saved = 0
+            errors = []
+            for f in star_files:
+                try:
+                    (star_dir / f.name).write_bytes(f.getvalue())
+                    saved += 1
+                except Exception as exc:
+                    errors.append(f"{f.name}: {exc}")
+            msg = [f"Zapisano {saved} plików STAR do `{star_dir}`"]
+            if errors:
+                msg.append(f"Błędy: {len(errors)} plików nie zapisano")
+            st.session_state.upload_feedback = msg
+            st.rerun()
+
+    st.divider()
+
+    # --- Status gotowości ---
+    st.subheader("Status kohorty")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("clinical.tsv", "✓" if state["has_clinical"] else "—")
+    c2.metric("sample sheet", "✓" if state["has_sample_sheet"] else "—")
+    star_count = len(_discover_star_files(DATA_RAW)) if DATA_RAW.exists() else 0
+    c3.metric("Pliki STAR", star_count)
+
+    if state["raw_ready"] and star_count > 0:
+        st.success("Kohorta gotowa — możesz przejść do etapu Parsowanie.")
+    else:
+        missing = []
+        if not state["has_clinical"]:
+            missing.append("clinical.tsv")
+        if not state["has_sample_sheet"]:
+            missing.append("sample sheet")
+        if star_count == 0:
+            missing.append("pliki STAR")
+        st.info(f"Brakuje: {', '.join(missing)}. Wgraj pozostałe pliki, by odblokować Parsowanie.")
+
+
 def render_placeholder(stage: dict, state: dict) -> None:
     """Tymczasowa treść dla sekcji jeszcze niezaimplementowanych."""
     st.header(f"{stage['label']}")
@@ -832,7 +972,6 @@ def render_placeholder(stage: dict, state: dict) -> None:
     # Krótki opis co tu będzie
     descriptions = {
         "download": "Pobranie danych TCGA-LUAD z GDC API (manifest, pliki STAR, clinical).",
-        "upload": "Ręczne wgranie plików STAR-Counts i clinical.tsv.",
     }
     if stage["id"] in descriptions:
         st.caption(descriptions[stage["id"]])
@@ -911,6 +1050,8 @@ def main() -> None:
         render_validate(state)
     elif active_stage["id"] == "dashboard":
         render_dashboard(state)
+    elif active_stage["id"] == "upload":
+        render_upload(state)
     else:
         render_placeholder(active_stage, state)
 
