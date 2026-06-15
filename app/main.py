@@ -939,6 +939,70 @@ def _validate_upload(content: bytes, expected: str, slot_label: str) -> tuple[bo
     )
 
 
+def _extract_star_from_zip(zip_bytes: bytes, target_dir: Path) -> dict:
+    """Rozpakowuje ZIP, rekurencyjnie znajduje pliki STAR i kopiuje do target_dir.
+
+    Obsługuje dowolną strukturę archiwum (pliki luzem, w podfolderach,
+    zagnieżdżone głęboko) - szuka wzorca na każdej głębokości. Każdy
+    znaleziony plik waliduje (czy faktycznie STAR-Counts). Duplikaty nazw
+    pomija z ostrzeżeniem. Chroni przed path traversal.
+
+    Zwraca słownik: saved, rejected, duplicates, errors (listy/liczby).
+    """
+    import io
+    import zipfile
+
+    result = {"saved": 0, "rejected": [], "duplicates": [], "errors": [], "total_matched": 0}
+    target_dir.mkdir(parents=True, exist_ok=True)
+    seen_names: set[str] = set()
+    # Nazwy plików już obecnych na dysku (kolizje z poprzednim importem)
+    existing = {p.name for p in target_dir.glob("*.tsv")}
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        result["errors"].append("Plik nie jest poprawnym archiwum ZIP.")
+        return result
+
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            # Nazwa pliku bez ścieżki (rekurencja niezależna od struktury)
+            base = Path(info.filename).name
+            # Wzorzec STAR-Counts na dowolnej głębokości
+            if not base.endswith(".rna_seq.augmented_star_gene_counts.tsv"):
+                continue
+            result["total_matched"] += 1
+
+            # Duplikat w obrębie archiwum lub względem dysku
+            if base in seen_names or base in existing:
+                result["duplicates"].append(base)
+                continue
+
+            try:
+                content = zf.read(info)
+            except Exception as exc:
+                result["errors"].append(f"{base}: błąd odczytu z archiwum ({exc})")
+                continue
+
+            # Walidacja zawartości: czy faktycznie STAR (nie tylko nazwa)
+            if _detect_file_type(content) != "star":
+                result["rejected"].append(base)
+                continue
+
+            # Bezpieczny zapis (spłaszczona nazwa, bez ścieżki z archiwum)
+            out_path = target_dir / base
+            try:
+                out_path.write_bytes(content)
+                seen_names.add(base)
+                result["saved"] += 1
+            except Exception as exc:
+                result["errors"].append(f"{base}: błąd zapisu ({exc})")
+
+    return result
+
+
 def render_upload(state: dict) -> None:
     """Ręczne wgrywanie plików do data/raw/ (alternatywa dla Pobierania)."""
     st.header("Wgrywanie plików")
@@ -1005,41 +1069,40 @@ def render_upload(state: dict) -> None:
             st.rerun()
 
     # --- Pliki STAR (wiele naraz) ---
-    st.subheader("Pliki STAR-Counts")
-    st.caption("Można wgrać wiele plików jednocześnie. Trafią do podkatalogu w `data/raw/`.")
-    star_files = st.file_uploader(
-        "Pliki *.rna_seq.augmented_star_gene_counts.tsv",
-        type=["tsv", "txt"], accept_multiple_files=True, key="up_star",
-    )
-    if star_files:
-        st.write(f"Wybrano plików: **{len(star_files)}**")
-        if st.button(f"Zapisz {len(star_files)} plików STAR", key="btn_star"):
+    st.subheader("Pliki STAR-Counts (archiwum ZIP)")
+    st.caption("Wgraj archiwum ZIP zawierające pliki STAR-Counts. Pliki mogą być "
+               "luzem lub w dowolnej strukturze podfolderów (np. tak jak pobiera je "
+               "GDC — każdy plik w osobnym katalogu). Przeszukiwanie jest rekurencyjne.")
+    st.caption("Rozpoznawane są pliki pasujące do wzorca "
+               "`<UUID>.rna_seq.augmented_star_gene_counts.tsv` na dowolnej głębokości.")
+    zip_file = st.file_uploader("Archiwum .zip z plikami STAR", type=["zip"], key="up_star_zip")
+    if zip_file is not None:
+        st.write(f"Archiwum: **{zip_file.name}** ({zip_file.size / 1024 / 1024:.1f} MB)")
+        if st.button("Rozpakuj i importuj pliki STAR", key="btn_star_zip"):
             star_dir = DATA_RAW / "uploaded_star"
-            star_dir.mkdir(parents=True, exist_ok=True)
-            saved = 0
-            rejected = []
-            errors = []
-            for f in star_files:
-                content = f.getvalue()
-                # Walidacja: czy to faktycznie plik STAR
-                if _detect_file_type(content) != "star":
-                    rejected.append(f.name)
-                    continue
-                try:
-                    (star_dir / f.name).write_bytes(content)
-                    saved += 1
-                except Exception as exc:
-                    errors.append(f"{f.name}: {exc}")
+            with st.spinner("Rozpakowywanie archiwum i wyszukiwanie plików STAR..."):
+                res = _extract_star_from_zip(zip_file.getvalue(), star_dir)
+
             msg = []
-            if saved:
-                msg.append(f"Zapisano {saved} plików STAR do `{star_dir}`")
-            if rejected:
-                preview = ", ".join(rejected[:3]) + ("..." if len(rejected) > 3 else "")
-                msg.append(f"Odrzucono {len(rejected)} plików (nie są plikami STAR-Counts): {preview}")
-            if errors:
-                msg.append(f"Błędy zapisu: {len(errors)} plików")
+            if res["total_matched"] == 0 and not res["errors"]:
+                msg.append("W archiwum nie znaleziono żadnych plików pasujących do wzorca "
+                           "STAR-Counts. Sprawdź, czy ZIP zawiera pliki "
+                           "`*.rna_seq.augmented_star_gene_counts.tsv`.")
+            if res["saved"]:
+                msg.append(f"Zaimportowano {res['saved']} plików STAR do `{star_dir}`")
+            if res["duplicates"]:
+                preview = ", ".join(res["duplicates"][:3]) + ("..." if len(res["duplicates"]) > 3 else "")
+                msg.append(f"Pominięto {len(res['duplicates'])} duplikatów "
+                           f"(plik o tej nazwie już istnieje): {preview}")
+            if res["rejected"]:
+                preview = ", ".join(res["rejected"][:3]) + ("..." if len(res["rejected"]) > 3 else "")
+                msg.append(f"Odrzucono {len(res['rejected'])} plików — pasują nazwą, ale "
+                           f"ich zawartość nie jest formatem STAR-Counts: {preview}")
+            if res["errors"]:
+                preview = "; ".join(res["errors"][:2]) + ("..." if len(res["errors"]) > 2 else "")
+                msg.append(f"Błędy: {len(res['errors'])} ({preview})")
             if not msg:
-                msg = ["Nie zapisano żadnych plików."]
+                msg = ["Nie zaimportowano żadnych plików."]
             st.session_state.upload_feedback = msg
             st.rerun()
 
