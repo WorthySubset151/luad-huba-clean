@@ -859,6 +859,86 @@ def render_dashboard(state: dict) -> None:
                     st.error(f"Błąd wykresu markerów: {exc}")
 
 
+def _detect_file_type(content: bytes) -> str:
+    """Rozpoznaje typ wgranego pliku po sygnaturze nagłówka.
+
+    Zwraca: 'star', 'sample_sheet', 'clinical' lub 'unknown'.
+    Sprawdza charakterystyczne kolumny/strukturę każdego formatu.
+    """
+    try:
+        # Pierwsze ~4KB wystarczy na nagłówek + kilka wierszy
+        head = content[:4096].decode("utf-8", errors="ignore")
+    except Exception:
+        return "unknown"
+
+    lines = head.splitlines()
+    if not lines:
+        return "unknown"
+
+    # STAR-Counts: komentarz GENCODE LUB gene_id+tpm_unstranded LUB wiersz meta
+    if head.startswith("#") and "gene-model" in head.lower():
+        return "star"
+    first_lines = "\n".join(lines[:8])
+    if "N_unmapped" in first_lines or "N_multimapping" in first_lines:
+        return "star"
+    # nagłówek STAR (po ewentualnym komentarzu)
+    header = lines[1] if lines[0].startswith("#") and len(lines) > 1 else lines[0]
+    header_cols = header.split("\t")
+    if "gene_id" in header_cols and "tpm_unstranded" in header_cols:
+        return "star"
+
+    # Clinical: kolumny z kropkami (cases.submitter_id, demographic.vital_status)
+    if "cases.submitter_id" in header_cols or "demographic.vital_status" in header_cols:
+        return "clinical"
+    if "diagnoses.ajcc_pathologic_stage" in header_cols:
+        return "clinical"
+
+    # Sample sheet: kolumny GDC ze spacjami (File Name, Sample ID, Case ID)
+    sheet_markers = {"File ID", "File Name", "Case ID", "Sample ID"}
+    if len(sheet_markers & set(header_cols)) >= 3:
+        return "sample_sheet"
+
+    return "unknown"
+
+
+# Czytelne nazwy typów do komunikatów
+_TYPE_LABELS = {
+    "star": "plik STAR-Counts",
+    "sample_sheet": "arkusz próbek (sample sheet)",
+    "clinical": "dane kliniczne (clinical)",
+    "unknown": "nierozpoznany format",
+}
+
+
+def _validate_upload(content: bytes, expected: str, slot_label: str) -> tuple[bool, str]:
+    """Sprawdza czy wgrany plik pasuje do oczekiwanego slotu.
+
+    Zwraca (czy_ok, komunikat). Przy niezgodności podpowiada właściwy slot.
+    """
+    detected = _detect_file_type(content)
+    if detected == expected:
+        return True, ""
+
+    detected_label = _TYPE_LABELS.get(detected, "nierozpoznany format")
+    if detected == "unknown":
+        return False, (
+            f"Ten plik ma nierozpoznaną strukturę — nie wygląda na {slot_label}. "
+            f"Sprawdź, czy wgrywasz właściwy plik (oczekiwany nagłówek pliku {slot_label})."
+        )
+    # Plik pasuje do innego znanego typu - podpowiedz gdzie go wgrać
+    slot_hints = {
+        "star": "uploadera „Pliki STAR-Counts” poniżej",
+        "sample_sheet": "uploadera „Arkusz próbek”",
+        "clinical": "uploadera „Dane kliniczne”",
+    }
+    hint = slot_hints.get(detected, "")
+    return False, (
+        f"Ten plik wygląda na {detected_label}, a nie na {slot_label}. "
+        f"Użyj {hint}." if hint else
+        f"Ten plik wygląda na {detected_label}, a nie na {slot_label}."
+    )
+
+
 def render_upload(state: dict) -> None:
     """Ręczne wgrywanie plików do data/raw/ (alternatywa dla Pobierania)."""
     st.header("Wgrywanie plików")
@@ -887,9 +967,14 @@ def render_upload(state: dict) -> None:
     clinical_file = st.file_uploader("clinical.tsv", type=["tsv", "txt"], key="up_clinical")
     if clinical_file is not None:
         if st.button("Zapisz clinical.tsv", key="btn_clinical"):
+            content = clinical_file.getvalue()
+            ok, msg = _validate_upload(content, "clinical", "dane kliniczne (clinical.tsv)")
+            if not ok:
+                st.error(msg)
+                return
             target = DATA_RAW / "clinical.tsv"
             try:
-                target.write_bytes(clinical_file.getvalue())
+                target.write_bytes(content)
                 st.session_state.upload_feedback = [f"Zapisano: {target.name} ({clinical_file.size} B)"]
             except Exception as exc:
                 st.error(f"Błąd zapisu: {exc}")
@@ -901,13 +986,18 @@ def render_upload(state: dict) -> None:
     sheet_file = st.file_uploader("gdc_sample_sheet*.tsv", type=["tsv", "txt"], key="up_sheet")
     if sheet_file is not None:
         if st.button("Zapisz sample sheet", key="btn_sheet"):
+            content = sheet_file.getvalue()
+            ok, msg = _validate_upload(content, "sample_sheet", "arkusz próbek (sample sheet)")
+            if not ok:
+                st.error(msg)
+                return
             # zachowujemy oryginalną nazwę jeśli pasuje do wzorca, inaczej standaryzujemy
             fname = sheet_file.name
             if not fname.startswith("gdc_sample_sheet"):
                 fname = "gdc_sample_sheet.tsv"
             target = DATA_RAW / fname
             try:
-                target.write_bytes(sheet_file.getvalue())
+                target.write_bytes(content)
                 st.session_state.upload_feedback = [f"Zapisano: {target.name} ({sheet_file.size} B)"]
             except Exception as exc:
                 st.error(f"Błąd zapisu: {exc}")
@@ -927,16 +1017,29 @@ def render_upload(state: dict) -> None:
             star_dir = DATA_RAW / "uploaded_star"
             star_dir.mkdir(parents=True, exist_ok=True)
             saved = 0
+            rejected = []
             errors = []
             for f in star_files:
+                content = f.getvalue()
+                # Walidacja: czy to faktycznie plik STAR
+                if _detect_file_type(content) != "star":
+                    rejected.append(f.name)
+                    continue
                 try:
-                    (star_dir / f.name).write_bytes(f.getvalue())
+                    (star_dir / f.name).write_bytes(content)
                     saved += 1
                 except Exception as exc:
                     errors.append(f"{f.name}: {exc}")
-            msg = [f"Zapisano {saved} plików STAR do `{star_dir}`"]
+            msg = []
+            if saved:
+                msg.append(f"Zapisano {saved} plików STAR do `{star_dir}`")
+            if rejected:
+                preview = ", ".join(rejected[:3]) + ("..." if len(rejected) > 3 else "")
+                msg.append(f"Odrzucono {len(rejected)} plików (nie są plikami STAR-Counts): {preview}")
             if errors:
-                msg.append(f"Błędy: {len(errors)} plików nie zapisano")
+                msg.append(f"Błędy zapisu: {len(errors)} plików")
+            if not msg:
+                msg = ["Nie zapisano żadnych plików."]
             st.session_state.upload_feedback = msg
             st.rerun()
 
