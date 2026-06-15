@@ -1,0 +1,324 @@
+"""Dashboard analityczny LUAD-HUBA — wizualizacje Plotly.
+
+Funkcje budujące wykresy z survival_dataset i expression_matrix.
+Adaptacja wizualizacji z notebooków 05 (EDA) i 06 (survival) do Plotly.
+"""
+
+__author__ = "Łukasz Połaski"
+
+import numpy as np
+import plotly.graph_objects as go
+import polars as pl
+from lifelines import KaplanMeierFitter
+from lifelines.statistics import logrank_test
+
+# Paleta spójna z notebookami (beż/brąz/zieleń)
+PALETTE = {
+    "primary": "#5a8b3c",    # zieleń
+    "secondary": "#8b5a3c",  # brąz
+    "accent": "#c4a484",     # beż
+    "dark": "#2a4a1c",       # ciemna zieleń
+    "stage": ["#5a8b3c", "#a8a030", "#a86a30", "#8b3c2a"],  # I->IV gradient
+}
+
+# Panele genów (a priori, z notebooków)
+SIGNATURE_PANEL = {
+    "NKX2-1": ("ENSG00000136352", -1),
+    "NAPSA":  ("ENSG00000131400", -1),
+    "SFTPC":  ("ENSG00000168484", -1),
+    "MKI67":  ("ENSG00000148773", +1),
+    "TOP2A":  ("ENSG00000131747", +1),
+    "BIRC5":  ("ENSG00000089685", +1),
+    "SPP1":   ("ENSG00000118785", +1),
+}
+
+LUAD_MARKERS = {
+    "EGFR":   "ENSG00000146648",
+    "KRAS":   "ENSG00000133703",
+    "TP53":   "ENSG00000141510",
+    "ALK":    "ENSG00000171094",
+    "ROS1":   "ENSG00000047936",
+    "NKX2-1": "ENSG00000136352",
+    "SFTPC":  "ENSG00000168484",
+}
+
+
+def collapse_stage(stage) -> str:
+    """Collapse szczegółowych stadiów do 4 grup + Unknown (jak w nb 06)."""
+    if stage is None:
+        return "Unknown"
+    s = str(stage).replace("Stage ", "")
+    if s in ("IV", "IVA", "IVB"):
+        return "IV"
+    if s.startswith("III"):
+        return "III"
+    if s.startswith("II"):
+        return "II"
+    if s.startswith("I"):
+        return "I"
+    return "Unknown"
+
+
+def find_gene_col(ensg_base: str, gene_cols: list) -> str | None:
+    """Znajduje kolumnę genu po prefiksie ENSG (pliki GDC mają wersję)."""
+    for c in gene_cols:
+        if c.startswith(ensg_base + ".") or c == ensg_base:
+            return c
+    return None
+
+
+def _layout(fig: go.Figure, title: str, xlabel: str, ylabel: str) -> go.Figure:
+    """Wspólny styl layoutu wykresów."""
+    fig.update_layout(
+        title=title,
+        xaxis_title=xlabel,
+        yaxis_title=ylabel,
+        template="plotly_white",
+        font=dict(family="sans-serif", size=13, color="#2a2a26"),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified",
+        legend=dict(bgcolor="rgba(250,248,244,0.8)"),
+        margin=dict(l=60, r=30, t=60, b=50),
+    )
+    fig.update_xaxes(gridcolor="rgba(0,0,0,0.08)")
+    fig.update_yaxes(gridcolor="rgba(0,0,0,0.08)")
+    return fig
+
+
+def _km_trace(pdf, mask, label, color, dash=None):
+    """Buduje ślad KM (schodkowa krzywa przeżycia + CI) dla podgrupy."""
+    kmf = KaplanMeierFitter()
+    kmf.fit(pdf["time_years"][mask], pdf["event"][mask], label=label)
+    sf = kmf.survival_function_
+    ci = kmf.confidence_interval_
+    times = sf.index.values
+    surv = sf.iloc[:, 0].values
+    lower = ci.iloc[:, 0].values
+    upper = ci.iloc[:, 1].values
+
+    n = int(mask.sum())
+    traces = []
+    # Pasmo CI
+    traces.append(go.Scatter(
+        x=np.concatenate([times, times[::-1]]),
+        y=np.concatenate([upper, lower[::-1]]),
+        fill="toself", fillcolor=color.replace(")", ",0.12)").replace("rgb", "rgba")
+            if color.startswith("rgb") else _hex_to_rgba(color, 0.12),
+        line=dict(width=0), hoverinfo="skip", showlegend=False,
+    ))
+    # Krzywa schodkowa
+    traces.append(go.Scatter(
+        x=times, y=surv, mode="lines", name=f"{label} (n={n})",
+        line=dict(color=color, width=2.5, shape="hv", dash=dash),
+        hovertemplate="%{y:.2f}<extra></extra>",
+    ))
+    return traces, kmf
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+# =====================================================================
+#  WYKRESY PRZEŻYWALNOŚCI
+# =====================================================================
+def km_overall(pdf) -> tuple[go.Figure, dict]:
+    """KM dla całej kohorty + statystyki (mediana OS, przeżycie 1/3/5-letnie)."""
+    fig = go.Figure()
+    traces, kmf = _km_trace(pdf, np.ones(len(pdf), dtype=bool),
+                            "Cała kohorta", PALETTE["primary"])
+    for t in traces:
+        fig.add_trace(t)
+
+    median_os = kmf.median_survival_time_
+    stats = {"median_os": float(median_os) if not np.isnan(median_os) else None}
+    for years in [1, 3, 5]:
+        try:
+            stats[f"surv_{years}y"] = float(kmf.survival_function_at_times(years).iloc[0])
+        except Exception:
+            stats[f"surv_{years}y"] = None
+
+    # Linia mediany
+    if stats["median_os"]:
+        fig.add_hline(y=0.5, line_dash="dash", line_color=PALETTE["secondary"], opacity=0.4)
+        fig.add_vline(x=median_os, line_dash="dash", line_color=PALETTE["secondary"], opacity=0.4)
+        fig.add_annotation(x=median_os, y=0.55, text=f"Mediana OS: {median_os:.2f} lat",
+                           showarrow=False, font=dict(color=PALETTE["dark"], size=12),
+                           xanchor="left", xshift=8)
+
+    _layout(fig, "Kaplan-Meier — cała kohorta TCGA-LUAD", "Czas (lata)",
+            "Prawdopodobieństwo przeżycia")
+    fig.update_yaxes(range=[0, 1.02])
+    return fig, stats
+
+
+def km_per_stage(pdf) -> tuple[go.Figure, dict]:
+    """KM rozbite per stadium (collapse do 4 grup) + log-rank."""
+    pdf = pdf.copy()
+    pdf["stage_group"] = pdf["ajcc_pathologic_stage"].apply(collapse_stage)
+
+    fig = go.Figure()
+    stage_order = ["I", "II", "III", "IV"]
+    present = [s for s in stage_order if (pdf["stage_group"] == s).any()]
+
+    for i, stage in enumerate(present):
+        mask = (pdf["stage_group"] == stage).values
+        if mask.sum() < 2:
+            continue
+        traces, _ = _km_trace(pdf, mask, f"Stage {stage}", PALETTE["stage"][i])
+        for t in traces:
+            fig.add_trace(t)
+
+    # Log-rank test (multivariate przez pary - tu uproszczone: I vs IV jako sygnał)
+    from lifelines.statistics import multivariate_logrank_test
+    mask_known = pdf["stage_group"].isin(stage_order).values
+    p_value = None
+    if mask_known.sum() > 10:
+        try:
+            res = multivariate_logrank_test(
+                pdf["time_years"][mask_known],
+                pdf["stage_group"][mask_known],
+                pdf["event"][mask_known],
+            )
+            p_value = float(res.p_value)
+        except Exception:
+            p_value = None
+
+    _layout(fig, "Kaplan-Meier per stadium (grupy główne)", "Czas (lata)",
+            "Prawdopodobieństwo przeżycia")
+    fig.update_yaxes(range=[0, 1.02])
+    return fig, {"p_value": p_value, "stages": present}
+
+
+def signature_score(ds, pdf) -> np.ndarray:
+    """Liczy signature score (znakowane z-score log2 TPM panelu) - jak nb 06."""
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    score = np.zeros(ds.height)
+    found = 0
+    for symbol, (ensg, sign) in SIGNATURE_PANEL.items():
+        col = find_gene_col(ensg, gene_cols)
+        if col is None:
+            continue
+        expr = ds[col].to_numpy().astype(float)
+        expr_log = np.log2(expr + 1)
+        std = expr_log.std()
+        if std > 0:
+            z = (expr_log - expr_log.mean()) / std
+            score += sign * z
+            found += 1
+    return score, found
+
+
+def km_signature(ds, pdf) -> tuple[go.Figure, dict]:
+    """KM dla sygnatury wielogenowej (high/low względem mediany score)."""
+    score, n_genes = signature_score(ds, pdf)
+    pdf = pdf.copy()
+    pdf["sig_score"] = score
+    median = np.median(score)
+    pdf["sig_group"] = np.where(score >= median, "high", "low")
+
+    fig = go.Figure()
+    high_mask = (pdf["sig_group"] == "high").values
+    low_mask = (pdf["sig_group"] == "low").values
+
+    traces_low, _ = _km_trace(pdf, low_mask, "Profil łagodny (low)", PALETTE["primary"])
+    traces_high, _ = _km_trace(pdf, high_mask, "Profil agresywny (high)", PALETTE["secondary"])
+    for t in traces_low + traces_high:
+        fig.add_trace(t)
+
+    p_value = None
+    try:
+        res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
+                           pdf["event"][high_mask], pdf["event"][low_mask])
+        p_value = float(res.p_value)
+    except Exception:
+        pass
+
+    _layout(fig, "Kaplan-Meier — sygnatura wielogenowa (podział: mediana)",
+            "Czas (lata)", "Prawdopodobieństwo przeżycia")
+    fig.update_yaxes(range=[0, 1.02])
+    return fig, {"p_value": p_value, "n_genes": n_genes}
+
+
+def km_single_gene(ds, pdf, gene_symbol: str, ensg: str) -> tuple[go.Figure, dict]:
+    """KM dla pojedynczego genu (high/low względem mediany ekspresji)."""
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    col = find_gene_col(ensg, gene_cols)
+    if col is None:
+        return None, {"error": f"Gen {gene_symbol} ({ensg}) nie znaleziony w macierzy"}
+
+    expr = ds[col].to_numpy().astype(float)
+    pdf = pdf.copy()
+    pdf["expr"] = expr
+    median = np.median(expr)
+    pdf["expr_group"] = np.where(expr >= median, "high", "low")
+
+    fig = go.Figure()
+    high_mask = (pdf["expr_group"] == "high").values
+    low_mask = (pdf["expr_group"] == "low").values
+
+    traces_high, _ = _km_trace(pdf, high_mask, f"{gene_symbol} high", PALETTE["primary"])
+    traces_low, _ = _km_trace(pdf, low_mask, f"{gene_symbol} low", PALETTE["secondary"])
+    for t in traces_high + traces_low:
+        fig.add_trace(t)
+
+    p_value = None
+    try:
+        res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
+                           pdf["event"][high_mask], pdf["event"][low_mask])
+        p_value = float(res.p_value)
+    except Exception:
+        pass
+
+    _layout(fig, f"Kaplan-Meier — {gene_symbol} high vs low (podział: mediana)",
+            "Czas (lata)", "Prawdopodobieństwo przeżycia")
+    fig.update_yaxes(range=[0, 1.02])
+    return fig, {"p_value": p_value, "median_expr": float(median)}
+
+
+# =====================================================================
+#  WYKRESY EKSPRESJI
+# =====================================================================
+def histogram_tpm(matrix: pl.DataFrame, sample_col: str) -> go.Figure:
+    """Histogram log2(TPM+1) dla jednej próbki - rozkład ekspresji."""
+    expr = matrix[sample_col].to_numpy().astype(float)
+    log_expr = np.log2(expr + 1)
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(x=log_expr, nbinsx=80,
+                               marker_color=PALETTE["primary"], opacity=0.85,
+                               name="log2(TPM+1)"))
+    _layout(fig, f"Rozkład ekspresji log2(TPM+1) — próbka {sample_col[:20]}",
+            "log2(TPM+1)", "Liczba genów")
+    fig.update_layout(hovermode="x")
+    return fig
+
+
+def markers_expression(matrix: pl.DataFrame, sample_cols: list) -> go.Figure:
+    """Ekspresja markerów LUAD uśredniona po próbkach (boxplot per marker)."""
+    gene_ids = matrix["gene_id"].to_list()
+    fig = go.Figure()
+
+    for symbol, ensg in LUAD_MARKERS.items():
+        col_idx = None
+        for i, gid in enumerate(gene_ids):
+            if gid.startswith(ensg + ".") or gid == ensg:
+                col_idx = i
+                break
+        if col_idx is None:
+            continue
+        # Ekspresja tego genu po wszystkich próbkach
+        row = matrix.row(col_idx)
+        # kolumny próbek (pomijamy gene_id na idx 0)
+        vals = np.array([row[matrix.columns.index(c)] for c in sample_cols], dtype=float)
+        log_vals = np.log2(vals + 1)
+        fig.add_trace(go.Box(y=log_vals, name=symbol, marker_color=PALETTE["primary"],
+                             line_color=PALETTE["dark"], boxpoints=False))
+
+    _layout(fig, "Ekspresja markerów LUAD (log2 TPM, rozkład po próbkach)",
+            "Marker", "log2(TPM+1)")
+    fig.update_layout(hovermode="closest", showlegend=False)
+    return fig

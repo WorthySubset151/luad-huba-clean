@@ -28,6 +28,9 @@ from src.cli_config import load_config, get_nested, resolve_metric, ConfigError
 from src.validate.runner import run_cohort_qc, discover_stems, save_qc_report
 from src.validate.qc_result import Severity, QCCategory
 
+# Moduł wizualizacji dashboardu (Plotly)
+import app.dashboard_viz as viz
+
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
@@ -43,6 +46,7 @@ STAGES = [
     {"id": "validate", "label": "Walidacja", "requires": "parsed", "always": False},
     {"id": "build_matrix", "label": "Macierz ekspresji", "requires": "parsed", "always": False},
     {"id": "build_survival", "label": "Zbiór przeżywalności", "requires": "matrix_built", "always": False},
+    {"id": "dashboard", "label": "Dashboard analityczny", "requires": "survival_built", "always": False},
     {"id": "config", "label": "Konfiguracja", "requires": None, "always": True},
 ]
 
@@ -533,29 +537,19 @@ def render_validate(state: dict) -> None:
 
 
 def _render_qc_report(summary: dict, issues: list) -> None:
-    """Renderuje raport QC: podsumowanie + lista problemów per istotność."""
-    # Podsumowanie liczbowe
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Wszystkie", summary["total"])
-    c2.metric("Błędy", summary["errors"])
-    c3.metric("Ostrzeżenia", summary["warnings"])
-    c4.metric("Info", summary["info"])
-
-    # Ogólny werdykt
-    if summary["errors"] == 0:
-        st.success("Kohorta przeszła walidację — brak błędów krytycznych.")
-    else:
-        st.error(f"Wykryto {summary['errors']} błędów krytycznych — wymagają uwagi.")
-
-    log_path = st.session_state.get("qc_log_path")
-    if log_path:
-        st.caption(f"Raport JSON zapisany: `{log_path}`")
-
-    if not issues:
-        st.info("Brak problemów do wyświetlenia — kohorta w pełni spójna.")
-        return
-
-    # Etykiety kategorii po polsku
+    """Renderuje raport QC: werdykt kontekstowy + problemy z wyjaśnieniem."""
+    # Kategorie obsługiwane automatycznie przez pipeline (nie wymagają interwencji)
+    HANDLED_BY_PIPELINE = {
+        "missing_clinical", "missing_survival", "orphan_star_file", "duplicate_sample",
+    }
+    # Co pipeline robi z każdą kategorią (wyjaśnienie dla użytkownika)
+    pipeline_action = {
+        "missing_clinical": "Pomijane przy budowie zbioru przeżywalności (brak danych klinicznych).",
+        "missing_survival": "Pomijane przy budowie zbioru przeżywalności (brak czasu obserwacji lub statusu).",
+        "orphan_star_file": "Ignorowane przy budowie macierzy (plik STAR bez próbki w sample sheet).",
+        "duplicate_sample": "Obsługiwane przez strategię duplikatów (deepest/first) przy budowie macierzy.",
+        "missing_star_file": "Próbka nie wejdzie do macierzy — jeśli oczekiwano pliku STAR, sprawdź pobieranie.",
+    }
     category_labels = {
         "missing_star_file": "Brakujący plik STAR",
         "orphan_star_file": "Osierocony plik STAR (bez próbki)",
@@ -564,20 +558,210 @@ def _render_qc_report(summary: dict, issues: list) -> None:
         "missing_survival": "Brak danych przeżycia",
     }
 
-    # Grupowanie po istotności
-    for sev, label, icon in [("error", "Błędy", "🔴"),
-                             ("warning", "Ostrzeżenia", "🟡"),
-                             ("info", "Informacje", "🔵")]:
-        sev_issues = [i for i in issues if i["severity"] == sev]
-        if not sev_issues:
-            continue
-        with st.expander(f"{icon} {label} ({len(sev_issues)})", expanded=(sev == "error")):
-            for issue in sev_issues:
-                cat = category_labels.get(issue["category"], issue["category"])
-                st.markdown(f"**{cat}** — {issue['message']}")
-                if issue.get("context"):
-                    ctx_preview = {k: v for k, v in list(issue["context"].items())[:3]}
-                    st.caption(f"Kontekst: {ctx_preview}")
+    # Podział problemów: obsługiwane vs wymagające uwagi
+    handled = [i for i in issues if i["category"] in HANDLED_BY_PIPELINE]
+    action_needed = [i for i in issues if i["category"] not in HANDLED_BY_PIPELINE]
+
+    # Podsumowanie liczbowe
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Wszystkie rozjazdy", summary["total"])
+    c2.metric("Obsługiwane automatycznie", len(handled))
+    c3.metric("Wymagają uwagi", len(action_needed))
+
+    # Werdykt kontekstowy - zależny od typu, nie liczby
+    if not issues:
+        st.success("Kohorta w pełni spójna — brak rozjazdów.")
+        log_path = st.session_state.get("qc_log_path")
+        if log_path:
+            st.caption(f"Raport JSON: `{log_path}`")
+        return
+
+    if not action_needed:
+        st.success(
+            f"Kohorta gotowa do analizy. Wykryto {len(handled)} rozjazdów typowych "
+            f"dla danych TCGA — wszystkie obsługiwane automatycznie przez pipeline "
+            f"(pominięcie przy budowie zbioru przeżywalności lub deduplikacja). "
+            f"Nie wymagają ręcznej interwencji."
+        )
+    else:
+        st.warning(
+            f"Wykryto {len(action_needed)} rozjazdów wartych sprawdzenia "
+            f"(poniżej) oraz {len(handled)} typowych dla TCGA (obsługiwanych automatycznie)."
+        )
+
+    log_path = st.session_state.get("qc_log_path")
+    if log_path:
+        st.caption(f"Raport JSON: `{log_path}`")
+
+    # Sekcja: wymagające uwagi (jeśli są) - pokazane jako pierwsze, rozwinięte
+    if action_needed:
+        st.subheader("Warto sprawdzić")
+        # grupowanie po kategorii
+        cats = {}
+        for i in action_needed:
+            cats.setdefault(i["category"], []).append(i)
+        for cat, items in cats.items():
+            label = category_labels.get(cat, cat)
+            with st.expander(f"⚠️ {label} ({len(items)})", expanded=True):
+                st.caption(pipeline_action.get(cat, ""))
+                for issue in items:
+                    st.markdown(f"- {issue['message']}")
+
+    # Sekcja: obsługiwane automatycznie (zwinięte, informacyjne)
+    if handled:
+        st.subheader("Obsługiwane automatycznie przez pipeline")
+        st.caption(
+            "Poniższe rozjazdy są typowe dla danych TCGA i nie wymagają działania — "
+            "pipeline radzi sobie z nimi sam. Pokazane dla pełnej transparentności."
+        )
+        cats = {}
+        for i in handled:
+            cats.setdefault(i["category"], []).append(i)
+        for cat, items in cats.items():
+            label = category_labels.get(cat, cat)
+            with st.expander(f"{label} ({len(items)})", expanded=False):
+                st.caption(pipeline_action.get(cat, ""))
+                for issue in items[:50]:
+                    ctx = issue.get("context", {})
+                    ctx_str = ""
+                    if ctx:
+                        sample = ctx.get("sample_id") or ctx.get("case_id") or ctx.get("stem", "")
+                        ctx_str = f" ({sample})" if sample else ""
+                    st.markdown(f"- {issue['message']}{ctx_str}")
+                if len(items) > 50:
+                    st.caption(f"... oraz {len(items) - 50} więcej (pełna lista w raporcie JSON)")
+
+
+def render_dashboard(state: dict) -> None:
+    """Dashboard analityczny - wizualizacje ekspresji i przeżywalności."""
+    st.header("Dashboard analityczny")
+    st.caption("Kluczowe wizualizacje biologiczne kohorty TCGA-LUAD.")
+
+    if not state["survival_built"]:
+        st.warning("Brak zbioru przeżywalności. Najpierw uruchom etap Zbiór przeżywalności.")
+        return
+
+    # Wczytanie danych (cache w session_state by nie czytać przy każdym przełączeniu zakładki)
+    try:
+        survival_path = DATA_PROCESSED / "survival_dataset.parquet"
+        ds = pl.read_parquet(survival_path)
+        pdf = ds.to_pandas()
+    except Exception as exc:
+        st.error(f"Błąd wczytania zbioru przeżywalności: {exc}")
+        return
+
+    # Podstawowe statystyki kohorty (zawsze widoczne)
+    n_samples = ds.height
+    n_events = int(ds["event"].sum()) if "event" in ds.columns else 0
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Próbki", n_samples)
+    c2.metric("Zdarzenia (zgony)", n_events)
+    c3.metric("Geny", len(gene_cols))
+
+    tab_surv, tab_expr = st.tabs(["Przeżywalność", "Ekspresja"])
+
+    # ===== ZAKŁADKA PRZEŻYWALNOŚĆ =====
+    with tab_surv:
+        st.subheader("Kaplan-Meier — cała kohorta")
+        try:
+            fig, stats = viz.km_overall(pdf)
+            st.plotly_chart(fig, use_container_width=True)
+            if stats["median_os"]:
+                cols = st.columns(4)
+                cols[0].metric("Mediana OS", f"{stats['median_os']:.2f} lat")
+                for i, y in enumerate([1, 3, 5]):
+                    s = stats.get(f"surv_{y}y")
+                    if s is not None:
+                        cols[i+1].metric(f"Przeżycie {y}-letnie", f"{s*100:.0f}%")
+        except Exception as exc:
+            st.error(f"Błąd wykresu KM overall: {exc}")
+
+        st.divider()
+        st.subheader("Kaplan-Meier — per stadium")
+        st.caption("Stadium zaawansowania jako najsilniejszy predyktor kliniczny.")
+        try:
+            fig, info = viz.km_per_stage(pdf)
+            st.plotly_chart(fig, use_container_width=True)
+            if info["p_value"] is not None:
+                sig = "istotne" if info["p_value"] < 0.05 else "nieistotne"
+                st.caption(f"Log-rank test (różnice między stadiami): p = {info['p_value']:.2e} ({sig})")
+        except Exception as exc:
+            st.error(f"Błąd wykresu KM per stage: {exc}")
+
+        st.divider()
+        st.subheader("Kaplan-Meier — sygnatura wielogenowa")
+        st.caption("Panel ekspresyjny a priori (różnicowanie + proliferacja + inwazja). "
+                   "Kombinacja genów jako sygnał prognostyczny.")
+        try:
+            fig, info = viz.km_signature(ds, pdf)
+            st.plotly_chart(fig, use_container_width=True)
+            if info["p_value"] is not None:
+                sig = "istotne" if info["p_value"] < 0.05 else "nieistotne"
+                st.caption(f"Log-rank test (high vs low): p = {info['p_value']:.4f} ({sig}), "
+                           f"panel {info['n_genes']} genów")
+        except Exception as exc:
+            st.error(f"Błąd wykresu sygnatury: {exc}")
+
+        st.divider()
+        st.subheader("Kaplan-Meier — pojedynczy gen")
+        st.caption("Wybierz gen, by zobaczyć stratyfikację przeżycia high/low względem mediany ekspresji.")
+        gene_options = list(viz.LUAD_MARKERS.keys()) + [
+            g for g in viz.SIGNATURE_PANEL.keys() if g not in viz.LUAD_MARKERS
+        ]
+        selected_gene = st.selectbox("Gen", options=sorted(set(gene_options)), index=0)
+        if selected_gene:
+            ensg = viz.LUAD_MARKERS.get(selected_gene) or viz.SIGNATURE_PANEL.get(selected_gene, (None,))[0]
+            if ensg:
+                try:
+                    fig, info = viz.km_single_gene(ds, pdf, selected_gene, ensg)
+                    if fig is not None:
+                        st.plotly_chart(fig, use_container_width=True)
+                        if info.get("p_value") is not None:
+                            sig = "istotne" if info["p_value"] < 0.05 else "nieistotne (trend)"
+                            st.caption(f"Log-rank test: p = {info['p_value']:.4f} ({sig})")
+                    else:
+                        st.info(info.get("error", "Brak danych dla genu."))
+                except Exception as exc:
+                    st.error(f"Błąd wykresu genu: {exc}")
+
+    # ===== ZAKŁADKA EKSPRESJA =====
+    with tab_expr:
+        # Macierz ekspresji (osobny plik - większy)
+        matrix_path = DATA_PROCESSED / "expression_matrix.parquet"
+        if not matrix_path.exists():
+            st.warning("Brak macierzy ekspresji do wizualizacji ekspresji.")
+        else:
+            try:
+                matrix = pl.read_parquet(matrix_path)
+                sample_cols = [c for c in matrix.columns if c != "gene_id"]
+            except Exception as exc:
+                st.error(f"Błąd wczytania macierzy: {exc}")
+                sample_cols = []
+
+            if sample_cols:
+                st.subheader("Rozkład ekspresji (log2 TPM)")
+                st.caption("Histogram ekspresji jednej próbki — bimodalność (geny off/on) "
+                           "to cecha zdrowego RNA-seq.")
+                sample_choice = st.selectbox("Próbka", options=sample_cols[:50], index=0)
+                try:
+                    fig = viz.histogram_tpm(matrix, sample_choice)
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Błąd histogramu: {exc}")
+
+                st.divider()
+                st.subheader("Ekspresja markerów LUAD")
+                st.caption("Rozkład ekspresji klasycznych markerów raka płuca po wszystkich próbkach. "
+                           "NKX2-1/SFTPC (różnicowanie) zwykle wysokie; ALK/ROS1 (działają przez "
+                           "fuzje) zwykle niskie w ekspresji.")
+                try:
+                    # Ograniczamy liczbę próbek dla wydajności boxplotu
+                    sample_subset = sample_cols[:200]
+                    fig = viz.markers_expression(matrix, sample_subset)
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Błąd wykresu markerów: {exc}")
 
 
 def render_placeholder(stage: dict, state: dict) -> None:
@@ -666,6 +850,8 @@ def main() -> None:
         render_build_survival(state)
     elif active_stage["id"] == "validate":
         render_validate(state)
+    elif active_stage["id"] == "dashboard":
+        render_dashboard(state)
     else:
         render_placeholder(active_stage, state)
 
