@@ -42,6 +42,57 @@ LUAD_MARKERS = {
     "SFTPC":  "ENSG00000168484",
 }
 
+# Krótkie, precyzyjne charakterystyki genów (rola w LUAD)
+GENE_INFO = {
+    "EGFR": "Receptor naskórkowego czynnika wzrostu. Mutacje aktywujące (del19, L858R) "
+            "częste w LUAD, zwłaszcza u niepalących — cel terapii inhibitorami TKI (gefitynib, ozymertynib).",
+    "KRAS": "Onkogen szlaku RAS/MAPK. Mutacje (G12C i in.) to najczęstszy driver LUAD; "
+            "wzajemnie wykluczające się z EGFR. Cel nowych inhibitorów KRAS-G12C (sotorasib).",
+    "TP53": "Gen supresorowy „strażnik genomu”. Mutacje bardzo częste w LUAD, zwykle współistnieją "
+            "z innymi driverami; związane z gorszym rokowaniem i niestabilnością genomową.",
+    "ALK":  "Kinaza receptorowa. Onkogenna przez REARANŻACJE/FUZJE (EML4-ALK), nie przez nadekspresję "
+            "— dlatego sam poziom mRNA bywa niski. Cel inhibitorów ALK (kryzotynib, alektynib).",
+    "ROS1": "Kinaza receptorowa. Onkogenna przez REARANŻACJE/FUZJE (~1-2% LUAD). Mechanizm fuzyjny "
+            "niewidoczny w samej ekspresji. Cel inhibitorów ROS1 (kryzotynib, entrektynib).",
+    "NKX2-1": "Czynnik transkrypcyjny (TTF-1) różnicowania pęcherzykowego płuc. Wysoka ekspresja = "
+              "lepiej zróżnicowany guz i LEPSZE rokowanie. Kluczowy marker diagnostyczny LUAD.",
+    "SFTPC": "Białko surfaktantu C, marker komórek pęcherzykowych typu II. Wysoka ekspresja wskazuje "
+             "na zróżnicowanie pęcherzykowe — zwykle korzystne rokowniczo.",
+    "NAPSA": "Napsyna A, proteaza aspartylowa pneumocytów. Marker różnicowania pęcherzykowego, "
+             "wspiera diagnostykę LUAD (vs rak płaskonabłonkowy).",
+    "MKI67": "Ki-67, marker proliferacji (frakcja dzielących się komórek). Wysoka ekspresja = "
+             "agresywniejszy, szybko rosnący guz — zwykle gorsze rokowanie.",
+    "TOP2A": "Topoizomeraza II alfa, enzym replikacji DNA. Marker proliferacji; wysoka ekspresja "
+             "wiąże się z agresywnością guza.",
+    "BIRC5": "Surwiwina, inhibitor apoptozy z rodziny IAP. Wysoka ekspresja = unikanie śmierci "
+             "komórkowej, proliferacja — niekorzystne rokowniczo.",
+    "SPP1": "Osteopontyna, glikoproteina macierzy. Związana z inwazją, przerzutowaniem i angiogenezą; "
+            "wysoka ekspresja zwykle niekorzystna rokowniczo.",
+}
+
+# Etykiety kolumn klinicznych (po polsku) do panelu próbki
+CLINICAL_LABELS = {
+    "case_id": "Pacjent (case_id)",
+    "sample_id": "Próbka (sample_id)",
+    "time": "Czas obserwacji (dni)",
+    "event": "Status (zgon)",
+    "age_at_index": "Wiek przy diagnozie",
+    "gender": "Płeć",
+    "ajcc_pathologic_stage": "Stadium (AJCC)",
+    "tissue_type": "Typ tkanki",
+}
+
+
+def _ensure_time_years(pdf):
+    """Zapewnia kolumnę time_years (survival_dataset ma 'time' w dniach)."""
+    pdf = pdf.copy()
+    if "time_years" not in pdf.columns:
+        if "time" in pdf.columns:
+            pdf["time_years"] = pdf["time"] / 365.25
+        else:
+            raise KeyError("Brak kolumny 'time' ani 'time_years' w danych przeżywalności")
+    return pdf
+
 
 def collapse_stage(stage) -> str:
     """Collapse szczegółowych stadiów do 4 grup + Unknown (jak w nb 06)."""
@@ -127,6 +178,7 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 # =====================================================================
 def km_overall(pdf) -> tuple[go.Figure, dict]:
     """KM dla całej kohorty + statystyki (mediana OS, przeżycie 1/3/5-letnie)."""
+    pdf = _ensure_time_years(pdf)
     fig = go.Figure()
     traces, kmf = _km_trace(pdf, np.ones(len(pdf), dtype=bool),
                             "Cała kohorta", PALETTE["primary"])
@@ -157,7 +209,7 @@ def km_overall(pdf) -> tuple[go.Figure, dict]:
 
 def km_per_stage(pdf) -> tuple[go.Figure, dict]:
     """KM rozbite per stadium (collapse do 4 grup) + log-rank."""
-    pdf = pdf.copy()
+    pdf = _ensure_time_years(pdf)
     pdf["stage_group"] = pdf["ajcc_pathologic_stage"].apply(collapse_stage)
 
     fig = go.Figure()
@@ -215,7 +267,7 @@ def signature_score(ds, pdf) -> np.ndarray:
 def km_signature(ds, pdf) -> tuple[go.Figure, dict]:
     """KM dla sygnatury wielogenowej (high/low względem mediany score)."""
     score, n_genes = signature_score(ds, pdf)
-    pdf = pdf.copy()
+    pdf = _ensure_time_years(pdf)
     pdf["sig_score"] = score
     median = np.median(score)
     pdf["sig_group"] = np.where(score >= median, "high", "low")
@@ -251,7 +303,7 @@ def km_single_gene(ds, pdf, gene_symbol: str, ensg: str) -> tuple[go.Figure, dic
         return None, {"error": f"Gen {gene_symbol} ({ensg}) nie znaleziony w macierzy"}
 
     expr = ds[col].to_numpy().astype(float)
-    pdf = pdf.copy()
+    pdf = _ensure_time_years(pdf)
     pdf["expr"] = expr
     median = np.median(expr)
     pdf["expr_group"] = np.where(expr >= median, "high", "low")

@@ -632,6 +632,57 @@ def _render_qc_report(summary: dict, issues: list) -> None:
                     st.caption(f"... oraz {len(items) - 50} więcej (pełna lista w raporcie JSON)")
 
 
+def _render_sample_clinical(ds, sample_col: str) -> None:
+    """Pokazuje dane kliniczne wybranej próbki (jeśli jest w survival_dataset)."""
+    # sample_id w macierzy to pełny aliquot; w survival to sample_id (krótszy)
+    # Dopasowanie po prefiksie (case_id: pierwsze 3 segmenty TCGA-XX-XXXX)
+    if "sample_id" not in ds.columns:
+        return
+
+    # Próba dopasowania: dokładne, potem po prefiksie próbki, potem po case
+    match = ds.filter(pl.col("sample_id") == sample_col)
+    if match.height == 0:
+        # spróbuj po prefiksie (case_id z sample_col, np. TCGA-XX-XXXX)
+        parts = sample_col.split("-")
+        if len(parts) >= 3:
+            case_prefix = "-".join(parts[:3])
+            match = ds.filter(pl.col("case_id").str.starts_with(case_prefix))
+
+    if match.height == 0:
+        st.caption("ℹ️ Ta próbka nie występuje w zbiorze przeżywalności "
+                   "(np. próbka normalna lub odfiltrowana) — brak danych klinicznych.")
+        return
+
+    row = match.row(0, named=True)
+    st.markdown("**Dane kliniczne próbki:**")
+    cols = st.columns(4)
+    fields = [
+        ("case_id", "Pacjent"),
+        ("ajcc_pathologic_stage", "Stadium"),
+        ("age_at_index", "Wiek"),
+        ("gender", "Płeć"),
+    ]
+    for i, (key, label) in enumerate(fields):
+        val = row.get(key)
+        if val is not None:
+            cols[i].metric(label, str(val))
+
+    # Druga linia: czas obserwacji + status
+    time_days = row.get("time")
+    event = row.get("event")
+    tissue = row.get("tissue_type")
+    info_parts = []
+    if time_days is not None:
+        info_parts.append(f"Czas obserwacji: **{time_days:.0f} dni** ({time_days/365.25:.1f} lat)")
+    if event is not None:
+        status = "zgon" if event else "żyje/cenzura"
+        info_parts.append(f"Status: **{status}**")
+    if tissue is not None:
+        info_parts.append(f"Tkanka: **{tissue}**")
+    if info_parts:
+        st.caption(" | ".join(info_parts))
+
+
 def render_dashboard(state: dict) -> None:
     """Dashboard analityczny - wizualizacje ekspresji i przeżywalności."""
     st.header("Dashboard analityczny")
@@ -711,6 +762,10 @@ def render_dashboard(state: dict) -> None:
         ]
         selected_gene = st.selectbox("Gen", options=sorted(set(gene_options)), index=0)
         if selected_gene:
+            # Charakterystyka genu (precyzyjna, spójna)
+            gene_desc = viz.GENE_INFO.get(selected_gene)
+            if gene_desc:
+                st.info(f"**{selected_gene}** — {gene_desc}")
             ensg = viz.LUAD_MARKERS.get(selected_gene) or viz.SIGNATURE_PANEL.get(selected_gene, (None,))[0]
             if ensg:
                 try:
@@ -744,6 +799,10 @@ def render_dashboard(state: dict) -> None:
                 st.caption("Histogram ekspresji jednej próbki — bimodalność (geny off/on) "
                            "to cecha zdrowego RNA-seq.")
                 sample_choice = st.selectbox("Próbka", options=sample_cols[:50], index=0)
+
+                # Panel informacji klinicznych o wybranej próbce (jeśli jest w survival_dataset)
+                _render_sample_clinical(ds, sample_choice)
+
                 try:
                     fig = viz.histogram_tpm(matrix, sample_choice)
                     st.plotly_chart(fig, use_container_width=True)
