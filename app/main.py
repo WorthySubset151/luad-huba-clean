@@ -145,7 +145,12 @@ def render_browse(state: dict) -> None:
     elif suffix in (".tsv", ".csv", ".txt"):
         sep = "\t" if suffix == ".tsv" else ","
         try:
-            df = pl.read_csv(file_choice, separator=sep, infer_schema_length=1000)
+            # comment_prefix="#" pomija linie komentarza (np. nagłówek GENCODE
+            # w surowych plikach STAR-Counts: "# gene-model: GENCODE v36"),
+            # które mają inną liczbę pól niż dane. Nieszkodliwe dla plików bez
+            # komentarzy (zwykły sample sheet, clinical).
+            df = pl.read_csv(file_choice, separator=sep, infer_schema_length=1000,
+                             comment_prefix="#")
             st.write(f"Wymiary: **{df.height} wierszy × {df.width} kolumn**")
             st.dataframe(df.head(20).to_pandas(), use_container_width=True)
         except Exception as exc:
