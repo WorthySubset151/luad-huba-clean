@@ -8,6 +8,7 @@ __author__ = "Łukasz Połaski"
 
 import sys
 from pathlib import Path
+from typing import Callable
 
 import polars as pl
 import streamlit as st
@@ -52,6 +53,7 @@ STAGES = [
     {"id": "build_matrix", "label": "Macierz ekspresji", "requires": "parsed", "always": False},
     {"id": "build_survival", "label": "Zbiór przeżywalności", "requires": "matrix_built", "always": False},
     {"id": "dashboard", "label": "Dashboard analityczny", "requires": "survival_built", "always": False},
+    {"id": "manage", "label": "Zarządzanie danymi", "requires": None, "always": True},
     {"id": "config", "label": "Konfiguracja", "requires": None, "always": True},
 ]
 
@@ -1310,6 +1312,284 @@ def render_upload(state: dict) -> None:
         st.info(f"Brakuje: {', '.join(missing)}. Wgraj pozostałe pliki, by odblokować Parsowanie.")
 
 
+DATA_ROOT = PROJECT_ROOT / "data"
+
+
+def _is_within_data(path: Path) -> bool:
+    """Twarda gwarancja bezpieczeństwa: czy ścieżka leży wewnątrz katalogu data/.
+
+    Chroni operacje kasowania - nigdy nie pozwala usunąć czegokolwiek poza
+    PROJECT_ROOT/data, nawet przy błędzie w konfiguracji ścieżek (neutralizuje
+    też próby ucieczki przez "..").
+    """
+    try:
+        resolved = path.resolve()
+        data_resolved = DATA_ROOT.resolve()
+        return resolved == data_resolved or data_resolved in resolved.parents
+    except Exception:
+        return False
+
+
+def _iter_scope_files(path: Path, mode: str) -> list[Path]:
+    """Listuje pliki w zakresie, z filtrem plików ukrytych (np. .gitkeep).
+
+    mode='shallow' - tylko pliki bezpośrednio w katalogu (bez podkatalogów);
+    używane dla 'Metadane kohorty' (data/raw bez uploaded_star).
+    mode='recursive' - wszystkie pliki rekurencyjnie (cały katalog).
+    """
+    if not path.exists():
+        return []
+    if mode == "shallow":
+        return sorted(f for f in path.iterdir()
+                      if f.is_file() and not f.name.startswith("."))
+    return sorted(f for f in path.rglob("*")
+                  if f.is_file() and not f.name.startswith("."))
+
+
+def _scope_stats(path: Path, mode: str) -> tuple[int, int]:
+    """Zwraca (liczba_plików, łączny_rozmiar_w_bajtach) dla zakresu."""
+    files = _iter_scope_files(path, mode)
+    total = 0
+    for f in files:
+        try:
+            total += f.stat().st_size
+        except Exception:
+            pass
+    return len(files), total
+
+
+def _fmt_size(num_bytes: int) -> str:
+    """Czytelny rozmiar (B/KB/MB/GB)."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _delete_scope(path: Path, mode: str,
+                  progress_callback: "Callable[[int, int, str], None] | None" = None
+                  ) -> tuple[int, list[str]]:
+    """Usuwa pliki w zakresie (shallow/recursive), z gwarancją bezpieczeństwa.
+
+    Odmawia działania, jeśli ścieżka nie jest wewnątrz data/. W trybie shallow
+    usuwa tylko pliki bezpośrednio w katalogu (zachowuje podkatalogi, np.
+    uploaded_star przy kasowaniu metadanych). progress_callback (idx, total,
+    nazwa) wywoływany po każdym pliku. Zwraca (liczba_usuniętych, błędy).
+    """
+    if not _is_within_data(path):
+        return 0, [f"ODMOWA: ścieżka {path} poza katalogiem data/ - operacja zablokowana"]
+    files = _iter_scope_files(path, mode)
+    total = len(files)
+    deleted = 0
+    errors = []
+    for idx, f in enumerate(files, start=1):
+        try:
+            f.unlink()
+            deleted += 1
+        except Exception as exc:
+            errors.append(f"{f.name}: {exc}")
+        if progress_callback is not None:
+            progress_callback(idx, total, f.name)
+    return deleted, errors
+
+
+def _build_archive_zip(targets: list[tuple[str, Path, str]],
+                       progress_callback: "Callable[[int, int, str], None] | None" = None
+                       ) -> bytes:
+    """Pakuje wybrane zakresy do archiwum ZIP w pamięci.
+
+    targets: lista (etykieta_w_archiwum, ścieżka, tryb). W trybie shallow pakuje
+    tylko pliki bezpośrednio w katalogu, w recursive zachowuje strukturę względną.
+    progress_callback (idx, total, nazwa) wywoływany po każdym spakowanym pliku.
+    """
+    import io
+    import zipfile
+    # Najpierw zbieramy wszystkie pliki (dla licznika postępu)
+    all_files = []
+    for label, path, mode in targets:
+        for f in _iter_scope_files(path, mode):
+            arcname = f"{label}/{f.name}" if mode == "shallow" else f"{label}/{f.relative_to(path)}"
+            all_files.append((f, arcname))
+
+    total = len(all_files)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, (f, arcname) in enumerate(all_files, start=1):
+            zf.write(f, arcname)
+            if progress_callback is not None:
+                progress_callback(idx, total, f.name)
+    return buf.getvalue()
+
+
+# Definicje zakresów zarządzania: klucz -> (etykieta, ścieżka, tryb, opis)
+# 'metadata' używa trybu shallow (data/raw BEZ uploaded_star), reszta recursive.
+MANAGE_SCOPES = {
+    "star": ("Pliki STAR-Counts", DATA_UPLOADED_STAR, "recursive",
+             "Surowe pliki ekspresji (data/raw/uploaded_star) — zwykle gigabajty"),
+    "metadata": ("Metadane kohorty", DATA_RAW, "shallow",
+                 "clinical.tsv, sample sheet, metadata.cart.json (bez plików STAR)"),
+    "interim": ("Parquety pośrednie", DATA_INTERIM, "recursive",
+                "Sparsowane pliki STAR (data/interim/star_counts)"),
+    "processed": ("Wyniki finalne", DATA_PROCESSED, "recursive",
+                  "Macierz ekspresji, zbiór przeżywalności, manifesty"),
+}
+
+
+def render_manage(state: dict) -> None:
+    """Zarządzanie danymi: archiwizacja (backup) i bezpieczne kasowanie.
+
+    Cztery niezależne kategorie - pliki STAR (ciężkie) oddzielone od lekkich
+    metadanych, by można je archiwizować/kasować osobno.
+    """
+    st.header("Zarządzanie danymi")
+    st.caption("Archiwizuj dane przed skasowaniem (backup) lub wyczyść pliki "
+               "pipeline'u, by zacząć od nowa. Pliki STAR (gigabajty) są osobną "
+               "kategorią — można je zachować/usunąć niezależnie od reszty.")
+
+    # Statystyki per kategoria
+    stats = {k: _scope_stats(v[1], v[2]) for k, v in MANAGE_SCOPES.items()}
+
+    st.subheader("Stan danych")
+    cols = st.columns(4)
+    for i, (key, (label, path, mode, _desc)) in enumerate(MANAGE_SCOPES.items()):
+        n, b = stats[key]
+        cols[i].metric(label, f"{n} plików", _fmt_size(b))
+
+    def _fmt_option(k):
+        label, _p, _m, _d = MANAGE_SCOPES[k]
+        n, b = stats[k]
+        return f"{label} ({n} plików, {_fmt_size(b)})"
+
+    st.divider()
+
+    # =================================================================
+    #  ARCHIWIZACJA
+    # =================================================================
+    st.subheader("Archiwizacja (backup)")
+    st.caption("Wybierz, co spakować do archiwum ZIP. Przydatne, by nie pobierać "
+               "ponownie gigabajtów surowych danych — można zarchiwizować same "
+               "pliki STAR, same wyniki, albo dowolną kombinację.")
+
+    arch_choices = st.multiselect(
+        "Co zarchiwizować", options=list(MANAGE_SCOPES.keys()),
+        default=["processed"], format_func=_fmt_option, key="arch_scope",
+    )
+
+    sel_bytes = sum(stats[k][1] for k in arch_choices)
+    if sel_bytes > 300 * 1024**2:
+        st.warning(
+            f"Wybrane dane mają {_fmt_size(sel_bytes)}. Pakowanie odbywa się "
+            f"w pamięci — w instalacji hostowanej (Streamlit Cloud) z ograniczonym "
+            f"RAM może się nie powieść. Lokalnie powinno zadziałać. Dla bardzo dużych "
+            f"zbiorów rozważ kopię katalogu `data/` ręcznie."
+        )
+
+    if arch_choices:
+        if st.button("Przygotuj archiwum ZIP", key="btn_archive"):
+            total_files = sum(stats[k][0] for k in arch_choices)
+            if total_files == 0:
+                st.info("Wybrane kategorie są puste — nie ma czego archiwizować.")
+            else:
+                targets = [(MANAGE_SCOPES[k][0].replace(" ", "_"),
+                            MANAGE_SCOPES[k][1], MANAGE_SCOPES[k][2]) for k in arch_choices]
+                progress = st.progress(0.0, text="Przygotowanie archiwum...")
+
+                def _on_archive(idx, total, name):
+                    progress.progress(idx / total if total else 1.0,
+                                      text=f"Pakowanie {idx}/{total}: {name}")
+                try:
+                    data = _build_archive_zip(targets, progress_callback=_on_archive)
+                    st.session_state.archive_data = data
+                    st.session_state.archive_size = len(data)
+                    progress.progress(1.0, text="Gotowe")
+                except MemoryError:
+                    st.error("Zabrakło pamięci przy pakowaniu. Wybierz mniej danych "
+                             "lub zarchiwizuj lokalnie.")
+                except Exception as exc:
+                    st.error(f"Błąd pakowania: {exc}")
+
+    if st.session_state.get("archive_data"):
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        st.success(f"Archiwum gotowe ({_fmt_size(st.session_state.archive_size)}). "
+                   f"Kliknij, by pobrać.")
+        st.download_button(
+            "Pobierz archiwum ZIP", data=st.session_state.archive_data,
+            file_name=f"luad-huba-backup_{ts}.zip", mime="application/zip", key="dl_archive",
+        )
+
+    st.divider()
+
+    # =================================================================
+    #  KASOWANIE
+    # =================================================================
+    st.subheader("Kasowanie danych")
+    st.error("**Uwaga: kasowanie jest nieodwracalne.** Zarchiwizuj dane powyżej, "
+             "jeśli chcesz zachować kopię. Operacja usuwa pliki trwale z dysku.")
+
+    del_choices = st.multiselect(
+        "Co skasować", options=list(MANAGE_SCOPES.keys()),
+        default=[], format_func=_fmt_option, key="del_scope",
+    )
+
+    if del_choices:
+        total_files = sum(stats[k][0] for k in del_choices)
+        total_bytes = sum(stats[k][1] for k in del_choices)
+
+        st.markdown("**Zostanie trwale usunięte:**")
+        for k in del_choices:
+            label, path, mode, desc = MANAGE_SCOPES[k]
+            n, b = stats[k]
+            st.markdown(f"- **{label}** — {n} plików, {_fmt_size(b)}  \n  "
+                        f"<span style='color:gray'>{desc}</span>", unsafe_allow_html=True)
+        st.markdown(f"**Razem: {total_files} plików, {_fmt_size(total_bytes)}**")
+
+        if total_files == 0:
+            st.info("Wybrane kategorie są już puste — nie ma czego kasować.")
+        else:
+            st.caption("Aby potwierdzić, wpisz **USUŃ** w polu poniżej i kliknij przycisk.")
+            confirm_text = st.text_input("Potwierdzenie", key="del_confirm",
+                                         placeholder="wpisz: USUŃ")
+            confirm_ok = confirm_text.strip().upper() == "USUŃ"
+
+            if st.button("Skasuj wybrane dane", key="btn_delete",
+                         type="primary", disabled=not confirm_ok):
+                # Pasek postępu - przy tysiącach plików/GB operacja trwa
+                progress = st.progress(0.0, text="Przygotowanie...")
+                results = []
+                # Łączna liczba plików do usunięcia (dla paska)
+                grand_total = sum(stats[k][0] for k in del_choices)
+                done = 0
+                for k in del_choices:
+                    label, path, mode, _ = MANAGE_SCOPES[k]
+
+                    def _on_delete(idx, total, name, _label=label):
+                        nonlocal done
+                        done += 1
+                        frac = done / grand_total if grand_total else 1.0
+                        progress.progress(min(frac, 1.0),
+                                          text=f"Usuwanie {_label}: {idx}/{total}")
+
+                    deleted, errors = _delete_scope(path, mode, progress_callback=_on_delete)
+                    results.append(f"{label}: usunięto {deleted} plików")
+                    for e in errors:
+                        results.append(f"  ⚠️ {e}")
+                progress.progress(1.0, text="Gotowe")
+                st.session_state.delete_feedback = results
+                st.rerun()
+
+            if not confirm_ok and confirm_text:
+                st.caption("Wpisane słowo nie pasuje — przycisk pozostaje zablokowany.")
+
+    if st.session_state.get("delete_feedback"):
+        st.success("Kasowanie zakończone:")
+        for msg in st.session_state.delete_feedback:
+            st.write(msg)
+        st.session_state.delete_feedback = []
+
+
 def render_placeholder(stage: dict, state: dict) -> None:
     """Fallback dla ewentualnych sekcji bez dedykowanego widoku (obecnie nieużywany —
     wszystkie etapy mają własne funkcje render)."""
@@ -1394,6 +1674,8 @@ def main() -> None:
         render_upload(state)
     elif active_stage["id"] == "download":
         render_download(state)
+    elif active_stage["id"] == "manage":
+        render_manage(state)
     else:
         render_placeholder(active_stage, state)
 
