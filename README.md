@@ -8,6 +8,11 @@ Genome Atlas) dla analizy przeżywalności w gruczolakoraku płuca. Obejmuje
 warstwę ETL (CLI), interaktywny interfejs graficzny (Streamlit) z dashboardem
 analitycznym oraz zestaw notebooków dokumentujących każdy etap przetwarzania.
 
+> **Aplikacja na żywo:** [luad-app-clean.streamlit.app](https://luad-app-clean.streamlit.app)
+> — pełny interfejs działa w chmurze (Streamlit Cloud). Uwaga: na hostowanej
+> instancji dane są efemeryczne (resetują się przy restarcie aplikacji), a
+> limity zasobów serwera mogą ograniczać operacje na dużych kohortach.
+
 ## Spis treści
 
 - [Opis](#opis)
@@ -138,8 +143,8 @@ panel boczny, który pokazuje status każdego etapu (gotowy / zablokowany).
 
 | Etap | Warunek wstępny | Opis |
 |------|-----------------|------|
-| **Pobieranie** | — | Pobranie danych TCGA-LUAD z GDC API |
-| **Wgrywanie** | — | Ręczne wgranie plików STAR-Counts i clinical.tsv |
+| **Pobieranie** | — | Pobranie danych TCGA-LUAD z GDC API (podzbiory) |
+| **Wgrywanie** | — | Wgranie clinical.tsv, sample sheet i plików STAR przez archiwum ZIP |
 | **Przeglądanie** | — | Podgląd plików (parquet, TSV, YAML) w repozytorium |
 | **Parsowanie** | surowe pliki | Parsowanie STAR-Counts do parquet z paskiem postępu |
 | **Walidacja** | sparsowane parquety | Kontrola jakości kohorty z raportem QC |
@@ -147,11 +152,13 @@ panel boczny, który pokazuje status każdego etapu (gotowy / zablokowany).
 | **Zbiór przeżywalności** | macierz | Integracja ekspresji z danymi klinicznymi |
 | **Dashboard analityczny** | zbiór przeżywalności | Wizualizacje KM, sygnatury, ekspresja markerów |
 | **Konfiguracja** | — | Edycja parametrów pipeline'u (YAML) |
+| **Zarządzanie danymi** | — | Archiwizacja (backup ZIP) i kasowanie plików pipeline'u |
 
-> **Status sekcji Pobieranie i Wgrywanie.** Pełny pipeline jest dostępny
-> z poziomu CLI. Sekcje Pobieranie (klient GDC API) i Wgrywanie w GUI są
-> przewidziane jako uzupełnienie i mogą być dokończone niezależnie — rdzeń
-> analityczny (parsowanie → macierz → survival → dashboard) działa w całości.
+Wszystkie sekcje są w pełni funkcjonalne i działają zarówno lokalnie, jak i na
+hostowanej instancji (Streamlit Cloud). Pobieranie używa czystego klienta API
+w Pythonie, a Wgrywanie przyjmuje pliki przez archiwum ZIP — oba podejścia
+działają niezależnie od środowiska (nie wymagają dostępu do systemu plików
+serwera ani zewnętrznych narzędzi binarnych).
 
 ### Dashboard analityczny
 
@@ -177,6 +184,36 @@ interaktywne (Plotly: najechanie kursorem, przybliżanie).
   czas obserwacji, status, typ tkanki) — łączy ekspresję z kontekstem klinicznym
 - **Ekspresja markerów LUAD** — rozkład klasycznych markerów raka płuca po
   wszystkich próbkach (wykres pudełkowy)
+
+### Zarządzanie danymi
+
+Sekcja domyka cykl życia danych w aplikacji — pozwala zarchiwizować dane przed
+skasowaniem i wyczyścić pliki pipeline'u, by zacząć od nowa z inną kohortą.
+Dane podzielone są na **cztery niezależne kategorie**, by ciężkie pliki STAR
+(gigabajty) można było archiwizować i kasować osobno od lekkich metadanych:
+
+- **Pliki STAR-Counts** (`data/raw/uploaded_star`) — surowe pliki ekspresji,
+  zwykle gigabajty
+- **Metadane kohorty** (`data/raw`, bez podkatalogu STAR) — clinical.tsv,
+  sample sheet, metadata.cart.json
+- **Parquety pośrednie** (`data/interim`) — sparsowane pliki STAR
+- **Wyniki finalne** (`data/processed`) — macierz ekspresji, zbiór przeżywalności
+
+**Archiwizacja (backup).** Pakuje wybrane kategorie (dowolna kombinacja) do
+archiwum ZIP i udostępnia do pobrania. Typowy przypadek: zarchiwizować same
+pliki STAR, by nie pobierać gigabajtów ponownie. Działa przez przeglądarkę,
+więc również na hostowanej instancji; dla dużych zbiorów pojawia się ostrzeżenie
+o limitach pamięci (pakowanie odbywa się w RAM).
+
+**Kasowanie.** Granularne, z naciskiem na bezpieczeństwo, ponieważ operacja
+jest nieodwracalna:
+- wybór kategorii (te same cztery; np. usunięcie samych plików STAR, by zwolnić
+  miejsce, zachowując metadane i wyniki)
+- podgląd dokładnego zakresu przed wykonaniem (ile plików, jaki rozmiar)
+- twarde potwierdzenie przez wpisanie słowa `USUŃ` (przycisk pozostaje
+  zablokowany, dopóki słowo się nie zgadza)
+- gwarancja bezpieczeństwa ścieżek — operacja działa wyłącznie wewnątrz
+  katalogu `data/` i odmawia usunięcia czegokolwiek poza nim
 
 ## Interfejs CLI
 
