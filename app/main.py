@@ -755,6 +755,26 @@ def render_dashboard(state: dict) -> None:
             st.error(f"Błąd wykresu KM per stage: {exc}")
 
         st.divider()
+        st.subheader("Model Coxa — kowarianty kliniczne")
+        st.caption("Proporcjonalne hazardy (wiek + płeć + stadium). Forest plot "
+                   "kwantyfikuje wpływ każdego czynnika na ryzyko zgonu (HR).")
+        try:
+            fig, info = viz.cox_clinical(pdf)
+            if fig is not None:
+                st.plotly_chart(fig, use_container_width=True)
+                cc = st.columns(3)
+                cc[0].metric("C-index", f"{info['c_index']:.3f}")
+                cc[1].metric("Pacjenci (I–IV)", info["n"])
+                cc[2].metric("Zdarzenia", info["n_events"])
+                st.dataframe(info["table"], use_container_width=True, hide_index=True)
+                st.caption("HR > 1 = wyższe ryzyko zgonu, HR < 1 = ochronne. "
+                           "C-index: 0.5 losowy, 1.0 perfekcyjny (baseline kliniczny zwykle 0.6–0.7).")
+            else:
+                st.info(info.get("error", "Brak danych do modelu Coxa."))
+        except Exception as exc:
+            st.error(f"Błąd modelu Coxa: {exc}")
+
+        st.divider()
         st.subheader("Kaplan-Meier — sygnatura wielogenowa")
         st.caption("Panel ekspresyjny a priori (różnicowanie + proliferacja + inwazja). "
                    "Kombinacja genów jako sygnał prognostyczny.")
@@ -829,6 +849,37 @@ def render_dashboard(state: dict) -> None:
                 st.error(f"Błąd wykresu porównania: {exc}")
         elif len(selected_multi) == 1:
             st.info("Wybierz co najmniej 2 geny do porównania.")
+
+        st.divider()
+        st.subheader("Model Coxa — klinika + panel genów")
+        st.caption("Czy panel ekspresyjny dodaje wartość prognostyczną PONAD model kliniczny? "
+                   "Każdy gen wchodzi osobno (z-score log2 TPM); porównujemy C-index obu modeli "
+                   "na tej samej kohorcie.")
+        try:
+            fig, info = viz.cox_clinical_genes(ds, pdf)
+            if fig is not None:
+                st.plotly_chart(fig, use_container_width=True)
+                cc = st.columns(3)
+                cc[0].metric("C-index (klinika)", f"{info['c_index_clinical']:.3f}")
+                cc[1].metric("C-index (klinika + geny)", f"{info['c_index_genes']:.3f}",
+                             delta=f"{info['delta']:+.3f}")
+                cc[2].metric("Pacjenci", info["n"])
+                st.dataframe(info["gene_table"], use_container_width=True, hide_index=True)
+                if info["delta"] > 0.01:
+                    st.success(f"Panel genów poprawia predykcję o {info['delta']:+.3f} C-index — "
+                               "ekspresja dodaje sygnał prognostyczny ponad samą klinikę.")
+                elif info["delta"] > 0:
+                    st.info(f"Panel genów nieznacznie poprawia predykcję ({info['delta']:+.3f}).")
+                else:
+                    st.warning(f"Panel genów nie poprawia C-index w tej kohorcie ({info['delta']:+.3f}).")
+                if info.get("missing"):
+                    st.caption(f"Geny pominięte (brak w macierzy): {', '.join(info['missing'])}.")
+                st.caption("HR per 1 SD ekspresji. Pojedyncze geny bywają nieistotne — "
+                           "siła sygnału tkwi w kombinacji (możliwe artefakty kolinearności).")
+            else:
+                st.info(info.get("error", "Brak danych do modelu Coxa."))
+        except Exception as exc:
+            st.error(f"Błąd modelu Coxa (geny): {exc}")
 
     # ===== ZAKŁADKA EKSPRESJA =====
     with tab_expr:
