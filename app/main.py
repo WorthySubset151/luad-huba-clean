@@ -34,6 +34,7 @@ import app.dashboard_viz as viz
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
+DATA_UPLOADED_STAR = DATA_RAW / "uploaded_star"
 CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yaml"
 
 # --- Definicja etapów pipeline'u (kolejność + zależności) ---
@@ -103,6 +104,7 @@ def render_browse(state: dict) -> None:
         "Katalog",
         options=[
             ("data/raw", DATA_RAW),
+            ("data/raw/uploaded_star (pliki STAR)", DATA_UPLOADED_STAR),
             ("data/interim/star_counts", DATA_INTERIM),
             ("data/processed", DATA_PROCESSED),
         ],
@@ -121,7 +123,8 @@ def render_browse(state: dict) -> None:
         st.info("Katalog jest pusty (brak plików do podglądu).")
         return
 
-    st.write(f"Plików: **{len(files)}**")
+    # Licznik na górze - od razu widać ile plików (istotne dla 601 STAR)
+    st.metric("Plików w katalogu", len(files))
 
     file_choice = st.selectbox(
         "Plik do podglądu",
