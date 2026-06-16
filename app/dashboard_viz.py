@@ -9,8 +9,12 @@ __author__ = "Łukasz Połaski"
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from lifelines import CoxPHFitter, KaplanMeierFitter
+from lifelines import KaplanMeierFitter
 from lifelines.statistics import logrank_test
+
+# Rdzeń analityczny (jedno źródło prawdy metodologii Cox/KM oraz danych panelu).
+from src.analysis import survival_report as sr
+from src.analysis.survival_report import SIGNATURE_PANEL, collapse_stage, find_gene_col
 
 # Paleta spójna z notebookami (beż/brąz/zieleń)
 PALETTE = {
@@ -21,16 +25,7 @@ PALETTE = {
     "stage": ["#5a8b3c", "#a8a030", "#a86a30", "#8b3c2a"],  # I->IV gradient
 }
 
-# Panele genów (a priori, z notebooków)
-SIGNATURE_PANEL = {
-    "NKX2-1": ("ENSG00000136352", -1),
-    "NAPSA":  ("ENSG00000131400", -1),
-    "SFTPC":  ("ENSG00000168484", -1),
-    "MKI67":  ("ENSG00000148773", +1),
-    "TOP2A":  ("ENSG00000131747", +1),
-    "BIRC5":  ("ENSG00000089685", +1),
-    "SPP1":   ("ENSG00000118785", +1),
-}
+# SIGNATURE_PANEL importowany z src/analysis (jedno źródło prawdy panelu genów).
 
 LUAD_MARKERS = {
     "EGFR":   "ENSG00000146648",
@@ -94,28 +89,10 @@ def _ensure_time_years(pdf):
     return pdf
 
 
-def collapse_stage(stage) -> str:
-    """Collapse szczegółowych stadiów do 4 grup + Unknown (jak w nb 06)."""
-    if stage is None:
-        return "Unknown"
-    s = str(stage).replace("Stage ", "")
-    if s in ("IV", "IVA", "IVB"):
-        return "IV"
-    if s.startswith("III"):
-        return "III"
-    if s.startswith("II"):
-        return "II"
-    if s.startswith("I"):
-        return "I"
-    return "Unknown"
+# collapse_stage i find_gene_col importowane z src/analysis (jedno źródło prawdy).
 
 
-def find_gene_col(ensg_base: str, gene_cols: list) -> str | None:
-    """Znajduje kolumnę genu po prefiksie ENSG (pliki GDC mają wersję)."""
-    for c in gene_cols:
-        if c.startswith(ensg_base + ".") or c == ensg_base:
-            return c
-    return None
+# (find_gene_col powyżej — importowany z src/analysis)
 
 
 def _layout(fig: go.Figure, title: str, xlabel: str, ylabel: str) -> go.Figure:
@@ -397,32 +374,10 @@ def km_multi_gene(ds, pdf, genes: list[tuple[str, str]]) -> tuple[go.Figure, lis
 
 
 # =====================================================================
-#  MODEL COXA (proportional hazards)
+#  MODEL COXA (proportional hazards) — tylko render Plotly
 # =====================================================================
-# Główne stadia użyte w modelu (NOS/Unknown odrzucone - nieuporządkowalne).
-MAIN_STAGES = ["I", "II", "III", "IV"]
-STAGE_NUMERIC_MAP = {"I": 1, "II": 2, "III": 3, "IV": 4}
-
-# Czytelne etykiety kowariantów klinicznych w forest plot.
-COX_CLINICAL_LABELS = {
-    "age_at_index": "Wiek (per rok)",
-    "gender_male": "Płeć męska",
-    "stage_numeric": "Stadium (per poziom)",
-}
-
-
-def _encode_clinical(pdf):
-    """Dokłada time_years + zakodowane kowarianty kliniczne (bez filtrowania wierszy).
-
-    Zwraca pełną ramkę z dodatkowymi kolumnami: stage_group, gender_male,
-    stage_numeric. Indeks pozostaje 0..n-1 (zgodny z porządkiem wierszy ds),
-    co pozwala dokładać kolumny genów pozycyjnie (jak w nb 06).
-    """
-    out = _ensure_time_years(pdf).copy()
-    out["stage_group"] = out["ajcc_pathologic_stage"].apply(collapse_stage)
-    out["gender_male"] = (out["gender"] == "male").astype(int)
-    out["stage_numeric"] = out["stage_group"].map(STAGE_NUMERIC_MAP)
-    return out
+# Obliczenia (encoding, fitowanie, C-index) w src/analysis/survival_report.py.
+# Tu zostaje wyłącznie forest plot Plotly + formatowanie tabel do st.dataframe.
 
 
 def _forest_plot(rows, title) -> go.Figure:
@@ -468,128 +423,71 @@ def _forest_plot(rows, title) -> go.Figure:
     return fig
 
 
-def cox_clinical(pdf) -> tuple[go.Figure, dict]:
+def cox_clinical(ds) -> tuple[go.Figure, dict]:
     """Model Coxa na kowariantach klinicznych: wiek + płeć + stadium.
 
-    Fituje na głównych stadiach (I-IV). Zwraca (forest_plot, info), gdzie
-    info = {c_index, n, n_events, table}. ``table`` to lista wierszy
-    (Kowariant, HR, 95% CI, p, Istotność) gotowa do st.dataframe.
+    Liczby pochodzą z src/analysis (jedno źródło prawdy); tu tylko forest plot
+    Plotly + tabela do st.dataframe. Wejście: polars DataFrame survival_dataset.
+    Zwraca (fig, info) gdzie info = {c_index, n, n_events, table},
+    lub (None, {"error": ...}).
     """
-    enc = _encode_clinical(pdf)
-    cox_df = enc[enc["stage_group"].isin(MAIN_STAGES)]
-    cox_input = cox_df[["time_years", "event", "age_at_index",
-                        "gender_male", "stage_numeric"]].dropna()
-    if cox_input.shape[0] < 20:
-        return None, {"error": "Za mało kompletnych obserwacji do modelu Coxa (min. 20)."}
+    rep = sr.cox_clinical_report(ds)
+    if "error" in rep:
+        return None, rep
 
-    try:
-        cph = CoxPHFitter()
-        cph.fit(cox_input, duration_col="time_years", event_col="event")
-    except Exception as exc:  # ConvergenceError, kolinearność itp.
-        return None, {"error": f"Model Coxa się nie dopasował: {exc}"}
-
-    s = cph.summary
     rows_fp, table = [], []
-    for idx in s.index:
-        hr = float(s.loc[idx, "exp(coef)"])
-        lo = float(s.loc[idx, "exp(coef) lower 95%"])
-        hi = float(s.loc[idx, "exp(coef) upper 95%"])
-        p = float(s.loc[idx, "p"])
-        label = COX_CLINICAL_LABELS.get(idx, idx)
-        rows_fp.append((label, hr, lo, hi, p))
+    for r in rep["rows"]:
+        rows_fp.append((r["label"], r["hr"], r["ci_lower"], r["ci_upper"], r["p"]))
         table.append({
-            "Kowariant": label,
-            "HR": f"{hr:.2f}",
-            "95% CI": f"{lo:.2f}–{hi:.2f}",
-            "p": f"{p:.3g}",
-            "Istotność": "istotny" if p < 0.05 else "nieistotny",
+            "Kowariant": r["label"],
+            "HR": f"{r['hr']:.2f}",
+            "95% CI": f"{r['ci_lower']:.2f}–{r['ci_upper']:.2f}",
+            "p": f"{r['p']:.3g}",
+            "Istotność": "istotny" if r["p"] < 0.05 else "nieistotny",
         })
 
     fig = _forest_plot(rows_fp, "Cox kliniczny — hazard ratios (wiek, płeć, stadium)")
     return fig, {
-        "c_index": float(cph.concordance_index_),
-        "n": int(cox_input.shape[0]),
-        "n_events": int(cox_input["event"].sum()),
+        "c_index": rep["c_index"],
+        "n": rep["n"],
+        "n_events": rep["n_events"],
         "table": table,
     }
 
 
-def cox_clinical_genes(ds, pdf) -> tuple[go.Figure, dict]:
+def cox_clinical_genes(ds) -> tuple[go.Figure, dict]:
     """Multivariate Cox: kowarianty kliniczne + panel genów (z-score log2 TPM).
 
-    Każdy gen panelu wchodzi jako osobny predyktor (z-score, BEZ znaku -
-    kierunek HR uczy się model). Fituje DWA modele na IDENTYCZNej kohorcie
-    (klinika vs klinika+geny), by porównanie C-index było uczciwe (ten sam N).
-
-    Zwraca (forest_plot_genów, info), gdzie info =
-    {c_index_clinical, c_index_genes, delta, n, gene_table, missing}.
+    Liczby z src/analysis (dwa modele na tej samej kohorcie -> uczciwe
+    porównanie C-index). Tu tylko forest plot genów + tabela. Wejście: polars
+    DataFrame survival_dataset. Zwraca (fig, info) gdzie info =
+    {c_index_clinical, c_index_genes, delta, n, gene_table, missing},
+    lub (None, {"error": ...}).
     """
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
-    enc = _encode_clinical(pdf)  # indeks 0..n-1 zgodny z porządkiem wierszy ds
+    rep = sr.cox_genes_report(ds)
+    if "error" in rep:
+        return None, rep
 
-    feats, missing = [], []
-    for symbol, (ensg, _sign) in SIGNATURE_PANEL.items():
-        col = find_gene_col(ensg, gene_cols)
-        if col is None:
-            missing.append(symbol)
-            continue
-        expr_log = np.log2(ds[col].to_numpy().astype(float) + 1)
-        std = expr_log.std()
-        if std == 0:
-            missing.append(symbol)
-            continue
-        z = (expr_log - expr_log.mean()) / std
-        feat = f"g_{symbol.replace('-', '_')}"
-        enc[feat] = z  # przypisanie pozycyjne: len(z) == ds.height == len(enc)
-        feats.append((feat, symbol))
-
-    if not feats:
-        return None, {"error": "Żaden gen panelu nie został znaleziony w macierzy."}
-
-    cox_df = enc[enc["stage_group"].isin(MAIN_STAGES)]
-    base = ["time_years", "event", "age_at_index", "gender_male", "stage_numeric"]
-    feat_cols = [f for f, _ in feats]
-    combined = cox_df[base + feat_cols].dropna()
-    if combined.shape[0] < 20:
-        return None, {"error": "Za mało kompletnych obserwacji do modelu Coxa (min. 20)."}
-
-    try:
-        cph_clin = CoxPHFitter()
-        cph_clin.fit(combined[base], duration_col="time_years", event_col="event")
-        cph_genes = CoxPHFitter()
-        cph_genes.fit(combined, duration_col="time_years", event_col="event")
-    except Exception as exc:
-        return None, {"error": f"Model Coxa się nie dopasował: {exc}"}
-
-    s = cph_genes.summary
     rows_fp, table = [], []
-    for feat, symbol in feats:
-        if feat not in s.index:
-            continue
-        hr = float(s.loc[feat, "exp(coef)"])
-        lo = float(s.loc[feat, "exp(coef) lower 95%"])
-        hi = float(s.loc[feat, "exp(coef) upper 95%"])
-        p = float(s.loc[feat, "p"])
-        rows_fp.append((symbol, hr, lo, hi, p))
+    for r in rep["rows"]:
+        rows_fp.append((r["symbol"], r["hr"], r["ci_lower"], r["ci_upper"], r["p"]))
         table.append({
-            "Gen": symbol,
-            "HR": f"{hr:.2f}",
-            "95% CI": f"{lo:.2f}–{hi:.2f}",
-            "p": f"{p:.3g}",
-            "Kierunek": "ochronny (HR<1)" if hr < 1 else "ryzyko (HR>1)",
+            "Gen": r["symbol"],
+            "HR": f"{r['hr']:.2f}",
+            "95% CI": f"{r['ci_lower']:.2f}–{r['ci_upper']:.2f}",
+            "p": f"{r['p']:.3g}",
+            "Kierunek": "ochronny (HR<1)" if r["hr"] < 1 else "ryzyko (HR>1)",
         })
 
     fig = _forest_plot(
         rows_fp, "Multivariate Cox — hazard ratios genów panelu (po korekcie o klinikę)")
-    c_clin = float(cph_clin.concordance_index_)
-    c_genes = float(cph_genes.concordance_index_)
     return fig, {
-        "c_index_clinical": c_clin,
-        "c_index_genes": c_genes,
-        "delta": c_genes - c_clin,
-        "n": int(combined.shape[0]),
+        "c_index_clinical": rep["c_index_clinical"],
+        "c_index_genes": rep["c_index_genes"],
+        "delta": rep["delta"],
+        "n": rep["n"],
         "gene_table": table,
-        "missing": missing,
+        "missing": rep["missing"],
     }
 
 

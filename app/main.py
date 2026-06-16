@@ -759,7 +759,7 @@ def render_dashboard(state: dict) -> None:
         st.caption("Proporcjonalne hazardy (wiek + płeć + stadium). Forest plot "
                    "kwantyfikuje wpływ każdego czynnika na ryzyko zgonu (HR).")
         try:
-            fig, info = viz.cox_clinical(pdf)
+            fig, info = viz.cox_clinical(ds)
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
                 cc = st.columns(3)
@@ -856,7 +856,7 @@ def render_dashboard(state: dict) -> None:
                    "Każdy gen wchodzi osobno (z-score log2 TPM); porównujemy C-index obu modeli "
                    "na tej samej kohorcie.")
         try:
-            fig, info = viz.cox_clinical_genes(ds, pdf)
+            fig, info = viz.cox_clinical_genes(ds)
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
                 cc = st.columns(3)
