@@ -27,6 +27,10 @@ from src.transform.survival_dataset import build_survival_dataset
 from src.cli_config import load_config, get_nested, resolve_metric, ConfigError
 from src.validate.runner import run_cohort_qc, discover_stems, save_qc_report
 from src.validate.qc_result import Severity, QCCategory
+from src.ingest.gdc_client import (
+    build_files_filter, query_files, parse_files_response, download_files, GDCClientError,
+)
+from src.ingest.cases_client import query_cases, parse_cases_response, CasesClientError
 
 # Moduł wizualizacji dashboardu (Plotly)
 import app.dashboard_viz as viz
@@ -40,7 +44,7 @@ CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yaml"
 # --- Definicja etapów pipeline'u (kolejność + zależności) ---
 # klucz: id etapu, label: nazwa w sidebarze, requires: id etapu wymaganego wcześniej
 STAGES = [
-    {"id": "download", "label": "Pobieranie", "requires": None, "always": False},
+    {"id": "download", "label": "Pobieranie", "requires": None, "always": True},
     {"id": "upload", "label": "Wgrywanie", "requires": None, "always": True},
     {"id": "browse", "label": "Przeglądanie", "requires": None, "always": True},
     {"id": "parse", "label": "Parsowanie", "requires": "raw_ready", "always": False},
@@ -1022,6 +1026,158 @@ def _extract_star_from_zip(zip_bytes: bytes, target_dir: Path) -> dict:
     return result
 
 
+def render_download(state: dict) -> None:
+    """Pobieranie danych z GDC API (rozsądne podzbiory; pełna kohorta przez CLI)."""
+    st.header("Pobieranie z GDC")
+    st.caption("Pobierz dane TCGA bezpośrednio z Genomic Data Commons przez API. "
+               "Sekcja jest przeznaczona do pobierania rozsądnych podzbiorów "
+               "(np. do testów). Dla pełnej kohorty zobacz uwagę na dole.")
+
+    DATA_RAW.mkdir(parents=True, exist_ok=True)
+
+    # Feedback z poprzedniego pobierania (przetrwa rerun)
+    if st.session_state.get("download_feedback"):
+        for msg in st.session_state.download_feedback:
+            st.success(msg)
+        st.session_state.download_feedback = []
+
+    col1, col2 = st.columns(2)
+    with col1:
+        project = st.text_input("Projekt GDC", value="TCGA-LUAD",
+                                help="Identyfikator projektu, np. TCGA-LUAD, TCGA-BRCA.")
+    with col2:
+        workflow = st.text_input("Workflow", value="STAR - Counts",
+                                 help="Typ workflow GDC. Domyślnie STAR - Counts.")
+
+    st.divider()
+
+    # --- Krok 1: sprawdzenie dostępności (samo metadane, szybkie) ---
+    st.subheader("1. Sprawdź dostępność")
+    st.caption("Zapytanie o metadane (bez pobierania plików) — ile plików i jaki rozmiar.")
+    if st.button("Sprawdź dostępność w GDC", key="btn_check_gdc"):
+        with st.spinner("Zapytanie do GDC API..."):
+            try:
+                filt = build_files_filter(project_id=project, workflow_type=workflow)
+                response = query_files(filters=filt, size=10000)
+                meta = parse_files_response(response)
+                total = response.get("data", {}).get("pagination", {}).get("total", 0)
+                total_mb = meta["file_size"].sum() / 1024**2 if "file_size" in meta.columns else 0
+                st.session_state.gdc_check = {
+                    "n_files": meta.height, "total": total, "total_mb": total_mb,
+                    "project": project, "workflow": workflow,
+                }
+            except GDCClientError as exc:
+                st.session_state.gdc_check = {"error": str(exc)}
+        st.rerun()
+
+    check = st.session_state.get("gdc_check")
+    if check:
+        if check.get("error"):
+            st.error(f"Błąd zapytania do GDC: {check['error']}")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Plików dostępnych", check["total"])
+            c2.metric("W odpowiedzi", check["n_files"])
+            c3.metric("Rozmiar (MB)", f"{check['total_mb']:.0f}")
+
+    st.divider()
+
+    # --- Krok 2: pobieranie ---
+    st.subheader("2. Pobierz dane")
+
+    n_default = 10
+    max_files = check["n_files"] if check and not check.get("error") else 601
+    n_files = st.number_input(
+        "Liczba plików STAR do pobrania", min_value=1, max_value=max(max_files, 1),
+        value=min(n_default, max(max_files, 1)), step=1,
+        help="Domyślnie mała liczba (do testów). Pobranie pełnej kohorty przez "
+             "przeglądarkę bywa zawodne — dla dużych ilości użyj CLI.",
+    )
+    if n_files > 50:
+        st.warning(f"Zamierzasz pobrać {n_files} plików. Dla dużych kohort pobieranie "
+                   f"przez GUI może być wolne lub zawodne (timeouty). Rozważ CLI "
+                   f"`download` lub GDC Data Transfer Tool — patrz uwaga poniżej.")
+
+    colA, colB = st.columns(2)
+    with colA:
+        get_clinical = st.checkbox("Pobierz dane kliniczne (clinical.tsv)", value=True)
+    with colB:
+        get_sheet = st.checkbox("Zapisz arkusz próbek (sample sheet)", value=True)
+
+    if st.button("Pobierz z GDC", key="btn_download_gdc", type="primary"):
+        progress = st.progress(0.0, text="Przygotowanie...")
+        status = st.empty()
+        msg = []
+        try:
+            # Metadane
+            status.write("Zapytanie o metadane plików...")
+            filt = build_files_filter(project_id=project, workflow_type=workflow)
+            response = query_files(filters=filt, size=int(n_files))
+            files_metadata = parse_files_response(response).head(int(n_files))
+            msg.append(f"Metadane: {files_metadata.height} plików")
+
+            # Sample sheet
+            if get_sheet:
+                from src.cli import _write_sample_sheet, _write_metadata_cart
+                sheet_path = DATA_RAW / "gdc_sample_sheet.tsv"
+                _write_sample_sheet(files_metadata, sheet_path)
+                _write_metadata_cart(response, DATA_RAW / "metadata.cart.json")
+                msg.append(f"Zapisano sample sheet: {sheet_path.name}")
+
+            # Clinical
+            if get_clinical:
+                status.write("Pobieranie danych klinicznych (/cases)...")
+                try:
+                    resp_cases = query_cases(size=10000)
+                    cases_df = parse_cases_response(resp_cases)
+                    clinical_path = DATA_RAW / "clinical.tsv"
+                    cases_df.write_csv(clinical_path, separator="\t", quote_style="never")
+                    msg.append(f"Zapisano clinical.tsv ({cases_df.height} wierszy)")
+                except CasesClientError as exc:
+                    msg.append(f"Błąd danych klinicznych: {exc}")
+
+            # Pliki STAR z paskiem postępu
+            star_dir = DATA_RAW / "uploaded_star"
+
+            def on_progress(idx, total, name):
+                progress.progress(idx / total, text=f"Pobieranie {idx}/{total}: {name}")
+
+            status.write(f"Pobieranie {files_metadata.height} plików STAR...")
+            report = download_files(
+                metadata=files_metadata, output_dir=star_dir,
+                show_progress=False, progress_callback=on_progress,
+            )
+            n_ok = report.filter(pl.col("verified")).height
+            n_fail = report.filter(~pl.col("verified")).height
+            msg.append(f"Pobrano {n_ok}/{report.height} plików STAR (zweryfikowanych MD5)")
+            if n_fail > 0:
+                msg.append(f"Błędy: {n_fail} plików nie zweryfikowanych")
+
+            progress.progress(1.0, text="Gotowe")
+            status.empty()
+        except GDCClientError as exc:
+            status.empty()
+            st.error(f"Błąd pobierania z GDC: {exc}")
+            return
+        except Exception as exc:
+            status.empty()
+            st.error(f"Nieoczekiwany błąd: {exc}")
+            return
+
+        st.session_state.download_feedback = msg
+        st.rerun()
+
+    st.divider()
+    st.info(
+        "**Pełna kohorta (setki plików, kilka GB)?** Pobieranie przez przeglądarkę "
+        "bywa zawodne. Użyj CLI:\n\n"
+        "```\nuv run python -m src.cli download --project TCGA-LUAD\n```\n\n"
+        "lub narzędzia [GDC Data Transfer Tool]"
+        "(https://gdc.cancer.gov/access-data/gdc-data-transfer-tool), które wznawia "
+        "przerwane transfery i jest zoptymalizowane pod duże pobierania."
+    )
+
+
 def render_upload(state: dict) -> None:
     """Ręczne wgrywanie plików do data/raw/ (alternatywa dla Pobierania)."""
     st.header("Wgrywanie plików")
@@ -1155,17 +1311,10 @@ def render_upload(state: dict) -> None:
 
 
 def render_placeholder(stage: dict, state: dict) -> None:
-    """Tymczasowa treść dla sekcji jeszcze niezaimplementowanych."""
+    """Fallback dla ewentualnych sekcji bez dedykowanego widoku (obecnie nieużywany —
+    wszystkie etapy mają własne funkcje render)."""
     st.header(f"{stage['label']}")
-    st.info(
-        f"Sekcja **{stage['label']}** zostanie zaimplementowana w kolejnej sesji."
-    )
-    # Krótki opis co tu będzie
-    descriptions = {
-        "download": "Pobranie danych TCGA-LUAD z GDC API (manifest, pliki STAR, clinical).",
-    }
-    if stage["id"] in descriptions:
-        st.caption(descriptions[stage["id"]])
+    st.info(f"Sekcja **{stage['label']}** nie ma jeszcze dedykowanego widoku.")
 
 
 # =====================================================================
@@ -1243,6 +1392,8 @@ def main() -> None:
         render_dashboard(state)
     elif active_stage["id"] == "upload":
         render_upload(state)
+    elif active_stage["id"] == "download":
+        render_download(state)
     else:
         render_placeholder(active_stage, state)
 

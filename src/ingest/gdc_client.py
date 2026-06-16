@@ -13,7 +13,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 import requests
@@ -326,6 +326,7 @@ def download_files(
     timeout: int = DEFAULT_DOWNLOAD_TIMEOUT,
     show_progress: bool = True,
     skip_existing: bool = True,
+    progress_callback: "Callable[[int, int, str], None] | None" = None,
 ) -> pl.DataFrame:
     """Pobiera pliki z GDC i weryfikuje sumy kontrolne MD5.
 
@@ -344,6 +345,9 @@ def download_files(
         show_progress: czy pokazywać pasek postępu tqdm.
         skip_existing: jeśli True, pomija pliki które już istnieją lokalnie
             z poprawnym MD5 (idempotentność, można wznowić przerwane pobieranie).
+        progress_callback: opcjonalna funkcja wywoływana po każdym pliku z
+            argumentami (numer_pliku, liczba_plikow, nazwa_pliku). Używana przez
+            GUI do paska postępu (CLI używa show_progress z tqdm).
 
     Zwraca:
         DataFrame z raportem pobierania, jeden wiersz per plik:
@@ -367,7 +371,8 @@ def download_files(
     if show_progress:
         rows = tqdm(rows, total=metadata.height, desc="Pobieranie z GDC", unit="plik")
 
-    for row in rows:
+    total = metadata.height
+    for idx, row in enumerate(rows, start=1):
         result = _download_one_file(
             file_id=row["file_id"],
             expected_md5=row.get("md5sum") if has_md5 else None,
@@ -378,6 +383,8 @@ def download_files(
             skip_existing=skip_existing,
         )
         results.append(result)
+        if progress_callback is not None:
+            progress_callback(idx, total, result.get("file_name", ""))
 
     return pl.DataFrame(results).select(DOWNLOAD_RESULT_COLUMNS)
 
