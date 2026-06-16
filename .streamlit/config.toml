@@ -11,3 +11,8 @@ font = "sans serif"
 # Sensowne defaulty dla lokalnego uruchomienia
 headless = true
 runOnSave = true
+# Limit rozmiaru wgrywanych plików (MB). Podniesiony do 1 GB dla archiwów ZIP
+# z plikami STAR-Counts - pełna kohorta TCGA-LUAD to ~700 MB skompresowana.
+# Uwaga: w instalacji hostowanej (np. Streamlit Cloud) obowiązują dodatkowo
+# limity zasobów serwera, niezależne od tej wartości.
+maxUploadSize = 1024

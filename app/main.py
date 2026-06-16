@@ -980,25 +980,36 @@ def _extract_star_from_zip(zip_bytes: bytes, target_dir: Path) -> dict:
                 result["duplicates"].append(base)
                 continue
 
-            try:
-                content = zf.read(info)
-            except Exception as exc:
-                result["errors"].append(f"{base}: błąd odczytu z archiwum ({exc})")
-                continue
-
-            # Walidacja zawartości: czy faktycznie STAR (nie tylko nazwa)
-            if _detect_file_type(content) != "star":
-                result["rejected"].append(base)
-                continue
-
-            # Bezpieczny zapis (spłaszczona nazwa, bez ścieżki z archiwum)
+            # Strumieniowe rozpakowanie na dysk (bez ładowania całego pliku do RAM).
+            # Walidacja zawartości na podstawie nagłówka (pierwszy blok), potem
+            # kopiowanie reszty blokami - bezpieczne dla dużych archiwów.
             out_path = target_dir / base
+            CHUNK = 1 << 20  # 1 MB
             try:
-                out_path.write_bytes(content)
+                with zf.open(info) as src:
+                    header = src.read(4096)
+                    # Walidacja: czy faktycznie STAR (nie tylko nazwa)
+                    if _detect_file_type(header) != "star":
+                        result["rejected"].append(base)
+                        continue
+                    # Zapis: najpierw nagłówek, potem reszta strumieniowo
+                    with open(out_path, "wb") as dst:
+                        dst.write(header)
+                        while True:
+                            chunk = src.read(CHUNK)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
                 seen_names.add(base)
                 result["saved"] += 1
             except Exception as exc:
-                result["errors"].append(f"{base}: błąd zapisu ({exc})")
+                result["errors"].append(f"{base}: błąd ({exc})")
+                # sprzątanie częściowo zapisanego pliku
+                if out_path.exists():
+                    try:
+                        out_path.unlink()
+                    except Exception:
+                        pass
 
     return result
 
@@ -1075,6 +1086,12 @@ def render_upload(state: dict) -> None:
                "GDC — każdy plik w osobnym katalogu). Przeszukiwanie jest rekurencyjne.")
     st.caption("Rozpoznawane są pliki pasujące do wzorca "
                "`<UUID>.rna_seq.augmented_star_gene_counts.tsv` na dowolnej głębokości.")
+    st.caption("Limit rozmiaru archiwum: **1 GB**. Dla bardzo dużych kohort — "
+               "zwłaszcza w instalacji hostowanej (Streamlit Cloud), gdzie obowiązują "
+               "dodatkowe limity zasobów serwera — rozważ pobranie danych bezpośrednio "
+               "narzędziem [GDC Data Transfer Tool]"
+               "(https://gdc.cancer.gov/access-data/gdc-data-transfer-tool) "
+               "lub komendą CLI `download`.")
     zip_file = st.file_uploader("Archiwum .zip z plikami STAR", type=["zip"], key="up_star_zip")
     if zip_file is not None:
         st.write(f"Archiwum: **{zip_file.name}** ({zip_file.size / 1024 / 1024:.1f} MB)")
