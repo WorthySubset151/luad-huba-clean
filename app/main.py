@@ -112,6 +112,30 @@ def stage_unlocked(stage: dict, state: dict) -> bool:
 # =====================================================================
 #  SEKCJE — RENDER
 # =====================================================================
+def _preview_full(df, csv_filename: str) -> None:
+    """Przewijalny podgląd CAŁEJ ramki (nie tylko kilku wierszy) + eksport CSV."""
+    st.write(f"Wymiary: **{df.height:,} wierszy × {df.width:,} kolumn**".replace(",", " "))
+    max_show = 20000
+    if df.height > max_show:
+        st.caption(
+            f"Tabela pokazuje pierwsze {max_show:,} z {df.height:,} wierszy "
+            "(cały plik pobierz poniżej).".replace(",", " ")
+        )
+        shown = df.head(max_show)
+    else:
+        shown = df
+    st.dataframe(shown.to_pandas(), use_container_width=True, height=560)
+    if df.height * df.width <= 5_000_000:
+        st.download_button(
+            "⬇ Pobierz cały plik jako CSV",
+            df.write_csv().encode("utf-8"),
+            file_name=csv_filename,
+            mime="text/csv",
+        )
+    else:
+        st.caption("Plik za duży na eksport CSV w przeglądarce — pobierz plik źródłowy z dysku.")
+
+
 def render_browse(state: dict) -> None:
     """Podgląd plików w data/ (raw, interim, processed)."""
     st.header("Przeglądanie danych")
@@ -153,8 +177,7 @@ def render_browse(state: dict) -> None:
     if suffix == ".parquet":
         try:
             df = pl.read_parquet(file_choice)
-            st.write(f"Wymiary: **{df.height} wierszy × {df.width} kolumn**")
-            st.dataframe(df.head(20).to_pandas(), use_container_width=True)
+            _preview_full(df, file_choice.stem + ".csv")
             with st.expander("Nazwy kolumn"):
                 st.write(list(df.columns))
         except Exception as exc:
@@ -168,8 +191,7 @@ def render_browse(state: dict) -> None:
             # komentarzy (zwykły sample sheet, clinical).
             df = pl.read_csv(file_choice, separator=sep, infer_schema_length=1000,
                              comment_prefix="#")
-            st.write(f"Wymiary: **{df.height} wierszy × {df.width} kolumn**")
-            st.dataframe(df.head(20).to_pandas(), use_container_width=True)
+            _preview_full(df, file_choice.stem + ".csv")
         except Exception as exc:
             st.error(f"Nie udało się wczytać pliku tabelarycznego: {exc}")
     elif suffix in (".json", ".yaml", ".yml"):
@@ -1087,10 +1109,10 @@ def render_dashboard(state: dict) -> None:
                 st.caption("Histogram ekspresji jednej próbki — bimodalność (geny off/on) "
                            "to cecha zdrowego RNA-seq.")
                 sample_choice = st.selectbox(
-                    "Próbka", options=sample_cols[:50], index=0,
-                    help="Wybierz pojedynczą próbkę (do 50 pierwszych), by zobaczyć rozkład "
-                         "ekspresji jej genów i jej dane kliniczne — kontrola jakości "
-                         "pojedynczej próbki.",
+                    "Próbka", options=sample_cols, index=0,
+                    help="Wybierz próbkę (wpisz fragment nazwy, by szybko odfiltrować listę) "
+                         "— zobaczysz rozkład ekspresji jej genów i jej dane kliniczne, "
+                         "kontrola jakości pojedynczej próbki.",
                 )
 
                 # Panel informacji klinicznych o wybranej próbce (jeśli jest w survival_dataset)
