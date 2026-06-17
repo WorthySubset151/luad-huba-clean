@@ -587,7 +587,7 @@ def render_build_survival(state: dict) -> None:
         st.info("Zbiór przeżywalności już istnieje — ponowne budowanie go nadpisze.")
         with st.expander("🔧 Napraw dane kliniczne w istniejącym zbiorze (bez przebudowy)"):
             st.caption(
-                "Dograja wiek/płeć/stadium z `data/raw/clinical.tsv` do istniejącego zbioru "
+                "Dogrywa wiek/płeć/stadium z `data/raw/clinical.tsv` do istniejącego zbioru "
                 "(złączenie po pacjencie). Etykiety przeżycia i geny pozostają nietknięte — "
                 "użyj, gdy zbiór ma pustą/niepełną kolumnę kliniczną, a nie chcesz przebudowywać."
             )

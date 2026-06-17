@@ -825,7 +825,7 @@ def repair_clinical(
         help="Plik wyjściowy. Domyślnie *_fixed.parquet obok wejścia.",
     ),
 ) -> None:
-    """Dograją poprawne wiek/płeć/stadium z clinical.tsv do istniejącego zbioru
+    """Dogrywa poprawne wiek/płeć/stadium z clinical.tsv do istniejącego zbioru
     przeżywalności (join po case_id). Bez przebudowy macierzy — etykiety przeżycia,
     próbki i geny pozostają nietknięte; odświeżane są tylko kowarianty kliniczne."""
     covariates = ["age_at_index", "gender", "ajcc_pathologic_stage"]
