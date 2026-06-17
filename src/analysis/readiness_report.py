@@ -49,9 +49,10 @@ def _pc_scores(gene_matrix, top_n: int = 2000):
 
     Zwraca (pc1_scores, var_ratio) albo (None, None) gdy się nie uda.
     """
-    vals = np.nan_to_num(np.asarray(gene_matrix, dtype=float), nan=0.0)  # próbki × geny
+    vals = np.nan_to_num(np.asarray(gene_matrix, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
     if vals.ndim != 2 or vals.shape[1] == 0 or vals.shape[0] < 3:
         return None, None
+    vals = np.clip(vals, 0.0, None)  # ekspresja jest nieujemna — chroni log2 przed NaN
     log_vals = np.log2(vals + 1.0)
     gene_var = log_vals.var(axis=0)
     k = int(min(top_n, log_vals.shape[1]))
@@ -62,7 +63,11 @@ def _pc_scores(gene_matrix, top_n: int = 2000):
     sd[sd == 0] = 1.0
     z = (sub - mu) / sd
     z = z - z.mean(axis=0, keepdims=True)
-    u, s, _ = np.linalg.svd(z, full_matrices=False)
+    z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+    try:
+        u, s, _ = np.linalg.svd(z, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None, None
     scores = u * s  # próbki × komponenty
     var_ratio = (s ** 2) / float((s ** 2).sum())
     return scores[:, 0], var_ratio
@@ -127,14 +132,25 @@ def ml_readiness_report(ds, esum=None) -> dict:
                     "green" if cens < 70 else "yellow" if cens < 90 else "red",
                     "Odsetek obserwacji uciętych (bez zdarzenia).",
                     "Wysoka cenzura — rozważ modele z wagami (IPCW)." if cens >= 70 else ""))
-    clin_fields = [c for c in ("age_at_index", "gender", "ajcc_pathologic_stage") if c in pdf.columns]
+    _field_labels = {"age_at_index": "wiek", "gender": "płeć", "ajcc_pathologic_stage": "stadium"}
+    clin_fields = [c for c in _field_labels if c in pdf.columns]
     if clin_fields:
-        complete = float(pdf[clin_fields].notna().all(axis=1).mean() * 100.0)
-        lab.append(_row("Kompletność etykiet klinicznych", f"{complete:.1f}%",
-                        "green" if complete >= 95 else "yellow" if complete >= 80 else "red",
-                        "Odsetek próbek z pełnym kompletem: wiek, płeć, stadium.",
-                        "Braki w etykietach — imputacja albo wykluczenie niekompletnych."
-                        if complete < 95 else ""))
+        per = {c: float(pdf[c].notna().mean() * 100.0) for c in clin_fields}
+        worst = min(per.values())
+        val = " · ".join(f"{_field_labels[c]} {per[c]:.0f}%" for c in clin_fields)
+        empty = [_field_labels[c] for c in clin_fields if per[c] < 1.0]
+        if empty:
+            c_status = "red"
+            c_act = ("Pole " + ", ".join(empty) + " jest puste — zbiór zbudowano bez tej "
+                     "etykiety; przebuduj zbiór przeżywalności z aktualnego clinical.tsv.")
+        elif worst < 80:
+            c_status, c_act = "red", "Duże braki — imputacja albo wykluczenie niekompletnych."
+        elif worst < 95:
+            c_status, c_act = "yellow", "Częściowe braki — rozważ imputację."
+        else:
+            c_status, c_act = "green", ""
+        lab.append(_row("Kompletność etykiet klinicznych", val, c_status,
+                        "Odsetek próbek z etykietą — osobno wiek, płeć, stadium.", c_act))
     groups_out.append({"title": "Etykieta (target)", "metrics": lab})
 
     # --- Balans klas ---
@@ -156,13 +172,18 @@ def ml_readiness_report(ds, esum=None) -> dict:
     qual = []
     metric = dist.get("metric")
     if metric:
-        qual.append(_row("Metryka normalizacji", str(metric).upper(),
-                         "green" if metric == "tpm" else "yellow" if metric in ("fpkm", "fpkm_uq") else "red",
-                         "TPM porównywalne między próbkami; FPKM zbliżone; counts surowe.",
-                         "FPKM → rozważ przeliczenie na TPM dla porównań między próbkami."
-                         if metric in ("fpkm", "fpkm_uq")
-                         else "Surowe counts — znormalizuj (TMM/DESeq2) lub użyj narzędzi robiących to same."
-                         if metric not in ("tpm", "fpkm", "fpkm_uq") else ""))
+        _ml = str(metric).lower()
+        if "tpm" in _ml:
+            _ms, _ma = "green", ""
+        elif "fpkm" in _ml or "rpkm" in _ml:
+            _ms, _ma = "yellow", "FPKM → rozważ przeliczenie na TPM dla porównań między próbkami."
+        elif "count" in _ml or "zlicz" in _ml:
+            _ms, _ma = "red", "Surowe zliczenia — znormalizuj (TMM/DESeq2) lub użyj narzędzi robiących to same."
+        else:
+            _ms, _ma = "yellow", "Metryki nie rozpoznano jednoznacznie — zweryfikuj normalizację przed ML."
+        qual.append(_row("Metryka normalizacji", str(metric), _ms,
+                         "TPM porównywalne między próbkami; FPKM zbliżone; surowe zliczenia wymagają normalizacji.",
+                         _ma))
     zero_pct = dist.get("zero_pct")
     if zero_pct is None and n_features:
         zero_pct = float((gm == 0).mean() * 100.0)

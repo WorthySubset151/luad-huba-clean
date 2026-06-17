@@ -40,6 +40,7 @@ import app.dashboard_viz as viz
 from src.analysis import survival_report as sr
 from src.analysis.expression_report import expression_summary
 from src.analysis import readiness_report as readiness
+from src.analysis import ml_export
 
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
@@ -1281,6 +1282,53 @@ def render_dashboard(state: dict) -> None:
                     "".join(_ml_card_html(_m) for _m in _grp["metrics"]),
                     unsafe_allow_html=True,
                 )
+
+        st.divider()
+        st.markdown("#### Eksport zbioru gotowego pod ML")
+        st.markdown(
+            "Z audytu w gotowy materiał: deduplikacja do 1 próbki/pacjenta, podział "
+            "train/test **grupowany po pacjencie**, selekcja cech i standaryzacja "
+            "**fitowane tylko na train** (bez wycieku do testu). Wynik: X/y + manifest w ZIP-ie."
+        )
+        _n_genes = len([c for c in ds.columns if c.startswith("ENSG")])
+        _c1, _c2, _c3 = st.columns(3)
+        _topk = _c1.number_input(
+            "Geny (top-K wg wariancji)", min_value=10, max_value=max(_n_genes, 10),
+            value=min(2000, _n_genes), step=100,
+            help="Ile najbardziej zmiennych genów zostawić jako cechy (selekcja fit na train).",
+        )
+        _testf = _c2.slider("Frakcja testu", 0.10, 0.40, 0.20, 0.05)
+        _seed = _c3.number_input("Seed", min_value=0, max_value=99999, value=42, step=1)
+        _c4, _c5 = st.columns(2)
+        _dedup = _c4.checkbox("Deduplikuj do 1 próbki/pacjenta", value=True)
+        _stdz = _c5.checkbox("Standaryzuj (z-score, fit na train)", value=True)
+        if st.button("Przygotuj zbiór ML", type="primary"):
+            with st.spinner("Buduję zbiór gotowy pod ML…"):
+                try:
+                    _res = ml_export.prepare_ml_dataset(
+                        ds, top_k=int(_topk), test_frac=float(_testf), seed=int(_seed),
+                        dedup=bool(_dedup), standardize=bool(_stdz),
+                    )
+                    st.session_state["_ml_export"] = (
+                        ml_export.build_ml_bundle(_res), _res["manifest"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.session_state.pop("_ml_export", None)
+                    st.error(f"Nie udało się przygotować zbioru: {exc}")
+        if "_ml_export" in st.session_state:
+            _zip_bytes, _mf = st.session_state["_ml_export"]
+            _pz, _sc = _mf["podzial"], _mf["selekcja_cech"]
+            st.success(
+                f"Gotowe: train {_pz['n_train']} · test {_pz['n_test']} próbek · "
+                f"{_sc['wybrane_top_k']} genów · wspólni pacjenci train/test: "
+                f"{_pz['pacjenci_wspolni_train_test']}."
+            )
+            st.download_button(
+                "⬇ Pobierz zbiór ML (ZIP)", _zip_bytes,
+                file_name="luad_ml_dataset.zip", mime="application/zip",
+            )
+            with st.expander("Podgląd manifestu"):
+                st.json(_mf)
 
 
 def _detect_file_type(content: bytes) -> str:
