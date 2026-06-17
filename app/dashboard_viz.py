@@ -221,54 +221,24 @@ def km_per_stage(ds) -> tuple[go.Figure, dict]:
     return fig, {"p_value": rep["logrank_p"], "stages": rep["stages_present"]}
 
 
-def signature_score(ds, pdf) -> np.ndarray:
-    """Liczy signature score (znakowane z-score log2 TPM panelu) - jak nb 06."""
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
-    score = np.zeros(ds.height)
-    found = 0
-    for symbol, (ensg, sign) in SIGNATURE_PANEL.items():
-        col = find_gene_col(ensg, gene_cols)
-        if col is None:
-            continue
-        expr = ds[col].to_numpy().astype(float)
-        expr_log = np.log2(expr + 1)
-        std = expr_log.std()
-        if std > 0:
-            z = (expr_log - expr_log.mean()) / std
-            score += sign * z
-            found += 1
-    return score, found
-
-
-def km_signature(ds, pdf) -> tuple[go.Figure, dict]:
-    """KM dla sygnatury wielogenowej (high/low względem mediany score)."""
-    score, n_genes = signature_score(ds, pdf)
-    pdf = _ensure_time_years(pdf)
-    pdf["sig_score"] = score
-    median = np.median(score)
-    pdf["sig_group"] = np.where(score >= median, "high", "low")
+def km_signature(ds) -> tuple[go.Figure, dict]:
+    """KM sygnatury wielogenowej. Liczby i krzywe z sr.signature_km_report."""
+    rep = sr.signature_km_report(ds)
+    if "error" in rep:
+        return None, rep
 
     fig = go.Figure()
-    high_mask = (pdf["sig_group"] == "high").values
-    low_mask = (pdf["sig_group"] == "low").values
-
-    traces_low, _ = _km_trace(pdf, low_mask, "Profil łagodny (low)", PALETTE["primary"])
-    traces_high, _ = _km_trace(pdf, high_mask, "Profil agresywny (high)", PALETTE["secondary"])
-    for t in traces_low + traces_high:
+    for t in _km_curve_trace(rep["low"]["curve"], rep["low"]["label"],
+                             PALETTE["primary"], n=rep["low"]["n"]):
         fig.add_trace(t)
-
-    p_value = None
-    try:
-        res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
-                           pdf["event"][high_mask], pdf["event"][low_mask])
-        p_value = float(res.p_value)
-    except Exception:
-        pass
+    for t in _km_curve_trace(rep["high"]["curve"], rep["high"]["label"],
+                             PALETTE["secondary"], n=rep["high"]["n"]):
+        fig.add_trace(t)
 
     _layout(fig, "Kaplan-Meier — sygnatura wielogenowa (podział: mediana)",
             "Czas (lata)", "Prawdopodobieństwo przeżycia")
     fig.update_yaxes(range=[0, 1.02])
-    return fig, {"p_value": p_value, "n_genes": n_genes}
+    return fig, {"p_value": rep["logrank_p"], "n_genes": rep["n_genes"]}
 
 
 def km_single_gene(ds, pdf, gene_symbol: str, ensg: str) -> tuple[go.Figure, dict]:

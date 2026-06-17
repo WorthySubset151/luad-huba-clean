@@ -29,7 +29,7 @@ __author__ = "Łukasz Połaski"
 import numpy as np
 import polars as pl
 from lifelines import CoxPHFitter, KaplanMeierFitter
-from lifelines.statistics import multivariate_logrank_test
+from lifelines.statistics import logrank_test, multivariate_logrank_test
 
 # Główne stadia użyte w modelu Coxa (uporządkowalne). NOS/Unknown odrzucone.
 MAIN_STAGES = ["I", "II", "III", "IV"]
@@ -202,6 +202,71 @@ def km_summary(ds: pl.DataFrame) -> dict:
     ]
     out["logrank_p"] = rep["logrank_p"]
     return out
+
+
+def signature_score(ds: pl.DataFrame) -> tuple[np.ndarray, int]:
+    """Signature score: znakowany z-score log2(TPM+1) panelu (jak nb 06).
+
+    Różnicowanie (znak -1) odejmuje, proliferacja/inwazja (znak +1) dodaje —
+    wyższy score = profil bardziej agresywny. Zwraca (score, liczba_genów).
+    """
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    score = np.zeros(ds.height)
+    found = 0
+    for _symbol, (ensg, sign) in SIGNATURE_PANEL.items():
+        col = find_gene_col(ensg, gene_cols)
+        if col is None:
+            continue
+        expr_log = np.log2(ds[col].to_numpy().astype(float) + 1)
+        std = expr_log.std()
+        if std > 0:
+            z = (expr_log - expr_log.mean()) / std
+            score += sign * z
+            found += 1
+    return score, found
+
+
+def _km_split_report(pdf, score, label_high: str, label_low: str) -> dict:
+    """KM dla podziału high/low względem mediany score + log-rank.
+
+    Jedno dopasowanie KM na grupę (z krzywą i statystykami), więc GUI i terminal
+    czytają to samo. Zwraca {median_split, logrank_p, high:{...}, low:{...}}.
+    """
+    median = float(np.median(score))
+    high = score >= median
+    low = ~high
+    high_stats, high_curve = _km_fit(pdf.loc[high, "time_years"], pdf.loc[high, "event"])
+    low_stats, low_curve = _km_fit(pdf.loc[low, "time_years"], pdf.loc[low, "event"])
+    logrank_p = None
+    try:
+        res = logrank_test(pdf.loc[high, "time_years"], pdf.loc[low, "time_years"],
+                           pdf.loc[high, "event"], pdf.loc[low, "event"])
+        logrank_p = float(res.p_value)
+    except Exception:
+        logrank_p = None
+    return {
+        "median_split": median,
+        "logrank_p": logrank_p,
+        "high": {"label": label_high, "n": int(high.sum()),
+                 "median_os": high_stats["median_os"], "stats": high_stats, "curve": high_curve},
+        "low": {"label": label_low, "n": int(low.sum()),
+                "median_os": low_stats["median_os"], "stats": low_stats, "curve": low_curve},
+    }
+
+
+def signature_km_report(ds: pl.DataFrame) -> dict:
+    """KM sygnatury wielogenowej (high/low względem mediany score).
+
+    Zwraca raport _km_split_report + n_genes, albo {'error': ...} gdy panelu
+    nie ma w macierzy.
+    """
+    score, n_genes = signature_score(ds)
+    if n_genes == 0:
+        return {"error": "Żaden gen panelu nie został znaleziony w macierzy."}
+    pdf = _encode_clinical(ds.to_pandas())
+    rep = _km_split_report(pdf, score, "Profil agresywny (high)", "Profil łagodny (low)")
+    rep["n_genes"] = n_genes
+    return rep
 
 
 def cox_clinical_report(ds: pl.DataFrame) -> dict:

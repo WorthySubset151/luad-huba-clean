@@ -65,14 +65,15 @@ def cohort_report(s: dict) -> Group:
 #  SURVIVAL — Kaplan-Meier + Cox
 # ---------------------------------------------------------------------------
 def _km_block(km: dict) -> Group:
-    head = Text("KAPLAN-MEIER — PRZEŻYCIE CAŁKOWITE (OS)", style=HEAD)
+    head = Text("Kaplan-Meier — cała kohorta", style=HEAD)
     med = f'{km["median_os"]:.2f} lat' if km["median_os"] is not None else "nieosiągnięta"
     line = Text.assemble(
         ("  Mediana OS: ", DIM), (med, GREEN),
         ("      1 / 3 / 5-letnie: ", DIM),
         (f'{_fmt_pct(km["surv_1y"])} / {_fmt_pct(km["surv_3y"])} / {_fmt_pct(km["surv_5y"])}', GREEN),
     )
-    t = Table(box=_BOX, border_style=DIM)
+    t = Table(box=_BOX, border_style=DIM, title="Kaplan-Meier — per stadium",
+              title_style=HEAD)
     t.add_column("Stadium", style=DIM)
     t.add_column("n", justify="right", style=GREEN)
     t.add_column("Mediana OS [lat]", justify="right", style=GREEN)
@@ -91,7 +92,7 @@ def _km_block(km: dict) -> Group:
 
 
 def _cox_clinical_block(rep: dict) -> Group:
-    head = Text("COX — KOWARIANTY KLINICZNE (wiek, płeć, stadium)", style=HEAD)
+    head = Text("Model Coxa — kowarianty kliniczne", style=HEAD)
     if "error" in rep:
         return Group(head, Text("  " + rep["error"], style=RISK))
     t = Table(box=_BOX, border_style=DIM)
@@ -117,7 +118,7 @@ def _cox_clinical_block(rep: dict) -> Group:
 
 
 def _cox_genes_block(rep: dict) -> Group:
-    head = Text("COX — KLINIKA + PANEL GENÓW (z-score log2 TPM)", style=HEAD)
+    head = Text("Model Coxa — klinika + panel genów", style=HEAD)
     if "error" in rep:
         return Group(head, Text("  " + rep["error"], style=RISK))
     t = Table(box=_BOX, border_style=DIM)
@@ -155,12 +156,37 @@ def _cox_genes_block(rep: dict) -> Group:
     return Group(*parts)
 
 
-def survival_report(km: dict, cox_clinical: dict, cox_genes: dict) -> Group:
+def _signature_block(rep: dict) -> Group:
+    head = Text("Kaplan-Meier — sygnatura wielogenowa", style=HEAD)
+    if "error" in rep:
+        return Group(head, Text("  " + rep["error"], style=RISK))
+    t = Table(box=_BOX, border_style=DIM)
+    t.add_column("Profil", style=DIM)
+    t.add_column("n", justify="right", style=GREEN)
+    t.add_column("Mediana OS [lat]", justify="right", style=GREEN)
+    for key, color in (("high", RISK), ("low", GREEN)):
+        g = rep[key]
+        med = f'{g["median_os"]:.2f}' if g["median_os"] is not None else "—"
+        t.add_row(Text(g["label"], style=color), str(g["n"]), med)
+    p = rep["logrank_p"]
+    sig = p is not None and p < 0.05
+    p_line = Text.assemble(
+        ("  Log-rank (high vs low): p = ", DIM),
+        (_fmt_p(p), GREEN if sig else RISK),
+        (f'   panel {rep["n_genes"]} genów   → ', DIM),
+        ("różnicuje przeżycie" if sig else "nie różnicuje", DIM),
+    )
+    return Group(head, t, p_line)
+
+
+def survival_report(km: dict, cox_clinical: dict, signature: dict, cox_genes: dict) -> Group:
     sep = Text("─" * 66, style=DIM)
     return Group(
         _km_block(km),
         Text(""), sep, Text(""),
         _cox_clinical_block(cox_clinical),
+        Text(""), sep, Text(""),
+        _signature_block(signature),
         Text(""), sep, Text(""),
         _cox_genes_block(cox_genes),
     )

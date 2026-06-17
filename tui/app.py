@@ -131,8 +131,9 @@ class SurvivalScreen(ReportScreen):
     def build_report(self, ds):
         km = sr.km_summary(ds)
         cox_clin = sr.cox_clinical_report(ds)
+        signature = sr.signature_km_report(ds)
         cox_genes = sr.cox_genes_report(ds)
-        return render.survival_report(km, cox_clin, cox_genes)
+        return render.survival_report(km, cox_clin, signature, cox_genes)
 
 
 class PipelineScreen(ReportScreen):

@@ -779,7 +779,7 @@ def render_dashboard(state: dict) -> None:
         st.caption("Panel ekspresyjny a priori (różnicowanie + proliferacja + inwazja). "
                    "Kombinacja genów jako sygnał prognostyczny.")
         try:
-            fig, info = viz.km_signature(ds, pdf)
+            fig, info = viz.km_signature(ds)
             st.plotly_chart(fig, use_container_width=True)
             if info["p_value"] is not None:
                 sig = "istotne" if info["p_value"] < 0.05 else "nieistotne"
