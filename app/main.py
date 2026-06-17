@@ -533,8 +533,34 @@ def render_build_survival(state: dict) -> None:
 
     sheet_path = _find_sample_sheet()
     clinical_path = DATA_RAW / "clinical.tsv"
+
+    with st.expander("📄 Wgraj / podmień plik kliniczny clinical.tsv",
+                     expanded=not clinical_path.exists()):
+        st.caption(
+            "Build używa `data/raw/clinical.tsv`. Jeśli obecny pochodzi z API i ma braki "
+            "(np. pusta płeć), wgraj pełny `clinical.tsv` z eksportu **„cart”** portalu GDC "
+            "(portal.gdc.cancer.gov → koszyk → Download → Clinical → TSV) — zastąpi obecny."
+        )
+        _up = st.file_uploader("clinical.tsv", type=["tsv", "txt"], key="clinical_override")
+        if _up is not None:
+            DATA_RAW.mkdir(parents=True, exist_ok=True)
+            clinical_path.write_bytes(_up.getvalue())
+            try:
+                _pc = parse_clinical(clinical_path)
+                _fill = " · ".join(
+                    f"{c} {100 * int(_pc[c].is_not_null().sum()) / _pc.height:.0f}%"
+                    for c in ("age_at_index", "gender", "ajcc_pathologic_stage")
+                    if c in _pc.columns
+                )
+                st.success(f"Zapisano clinical.tsv. Kompletność po parsowaniu: {_fill}.")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Wgrany plik nie parsuje się jako clinical.tsv: {exc}")
+
     if sheet_path is None or not clinical_path.exists():
-        st.error("Brak sample sheet lub `clinical.tsv` w `data/raw/`.")
+        st.error(
+            "Brak sample sheet (`gdc_sample_sheet*.tsv`) lub `clinical.tsv` w `data/raw/`. "
+            "Wgraj clinical.tsv powyżej albo dodaj pliki przez etap Pobieranie/Wgrywanie."
+        )
         return
 
     cfg = {}
@@ -559,6 +585,38 @@ def render_build_survival(state: dict) -> None:
 
     if state["survival_built"]:
         st.info("Zbiór przeżywalności już istnieje — ponowne budowanie go nadpisze.")
+        with st.expander("🔧 Napraw dane kliniczne w istniejącym zbiorze (bez przebudowy)"):
+            st.caption(
+                "Dograja wiek/płeć/stadium z `data/raw/clinical.tsv` do istniejącego zbioru "
+                "(złączenie po pacjencie). Etykiety przeżycia i geny pozostają nietknięte — "
+                "użyj, gdy zbiór ma pustą/niepełną kolumnę kliniczną, a nie chcesz przebudowywać."
+            )
+            if st.button("Napraw dane kliniczne"):
+                try:
+                    _dsp = DATA_PROCESSED / "survival_dataset.parquet"
+                    _ds = pl.read_parquet(_dsp)
+                    _clin = parse_clinical(clinical_path)
+                    _cov = ["age_at_index", "gender", "ajcc_pathologic_stage"]
+                    _before = " · ".join(
+                        f"{c} {100 * int(_ds[c].is_not_null().sum()) / _ds.height:.0f}%"
+                        for c in _cov if c in _ds.columns
+                    )
+                    _order = _ds.columns
+                    _ds = _ds.drop([c for c in _cov if c in _ds.columns]).join(
+                        _clin.select(
+                            ["case_submitter_id"] + [c for c in _cov if c in _clin.columns]
+                        ),
+                        left_on="case_id", right_on="case_submitter_id", how="left",
+                    ).select([c for c in _order if c in _ds.columns])
+                    _after = " · ".join(
+                        f"{c} {100 * int(_ds[c].is_not_null().sum()) / _ds.height:.0f}%"
+                        for c in _cov if c in _ds.columns
+                    )
+                    _ds.write_parquet(_dsp)
+                    st.success(f"Naprawiono. PRZED: {_before}  →  PO: {_after}")
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Naprawa nie powiodła się: {exc}")
 
     # Pokaż wynik z poprzedniego uruchomienia (przetrwał rerun)
     if st.session_state.get("survival_result"):
