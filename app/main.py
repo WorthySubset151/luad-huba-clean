@@ -1202,14 +1202,8 @@ def render_download(state: dict) -> None:
     n_files = st.number_input(
         "Liczba plików STAR do pobrania", min_value=1, max_value=max(max_files, 1),
         value=min(n_default, max(max_files, 1)), step=1,
-        help="Domyślnie mała liczba (do testów). Pobranie pełnej kohorty przez "
-             "przeglądarkę bywa zawodne — dla dużych ilości użyj CLI.",
+        help="Domyślnie mała liczba (do szybkiego testu). Możesz pobrać całą dostępną kohortę.",
     )
-    if n_files > 50:
-        st.warning(f"Zamierzasz pobrać {n_files} plików. Dla dużych kohort pobieranie "
-                   f"przez GUI może być wolne lub zawodne (timeouty). Rozważ CLI "
-                   f"`download` lub GDC Data Transfer Tool — patrz uwaga poniżej.")
-
     colA, colB = st.columns(2)
     with colA:
         get_clinical = st.checkbox("Pobierz dane kliniczne (clinical.tsv)", value=True)
@@ -1278,16 +1272,6 @@ def render_download(state: dict) -> None:
 
         st.session_state.download_feedback = msg
         st.rerun()
-
-    st.divider()
-    st.info(
-        "**Pełna kohorta (setki plików, kilka GB)?** Pobieranie przez przeglądarkę "
-        "bywa zawodne. Użyj CLI:\n\n"
-        "```\nuv run python -m src.cli download --project TCGA-LUAD\n```\n\n"
-        "lub narzędzia [GDC Data Transfer Tool]"
-        "(https://gdc.cancer.gov/access-data/gdc-data-transfer-tool), które wznawia "
-        "przerwane transfery i jest zoptymalizowane pod duże pobierania."
-    )
 
 
 def render_upload(state: dict) -> None:
