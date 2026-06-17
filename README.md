@@ -284,6 +284,10 @@ uv run python -m src.cli build-survival --config my_experiment.yaml
 
 # Walidacja w trybie strict (kod wyjścia 1 przy jakimkolwiek błędzie krytycznym)
 uv run python -m src.cli validate-cohort --strict
+
+# Naprawa pustych kolumn klinicznych w gotowym zbiorze — dograja wiek/płeć/stadium
+# z clinical.tsv po case_id, bez przebudowy macierzy (etykiety i geny nietknięte)
+uv run python -m src.cli repair-clinical --clinical data/raw/clinical.tsv
 ```
 
 ## Omówienie modułów i funkcji
