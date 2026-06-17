@@ -30,6 +30,50 @@ class SurvivalDatasetError(Exception):
     """Zgłaszany, gdy integracja danych do zbioru przeżywalności nie może się powieść."""
 
 
+_CLINICAL_COVARIATE_LABELS: dict[str, str] = {
+    "age_at_index": "wiek",
+    "gender": "płeć",
+    "ajcc_pathologic_stage": "stadium",
+}
+# Poniżej twardego progu kolumna jest praktycznie pusta -> zbiór wadliwy (przerwij).
+# Poniżej miękkiego -> częściowe braki (ostrzeż, ale zbuduj).
+_CLINICAL_HARD_MIN = 0.20
+_CLINICAL_SOFT_MIN = 0.90
+
+
+def _check_clinical_completeness(dataset: pl.DataFrame) -> None:
+    """Strażnik kompletności kowariantów klinicznych.
+
+    Łapie niepełne dane kliniczne (częsty objaw niepełnego eksportu z API GDC)
+    ZANIM powstanie wadliwy zbiór: przy praktycznie pustej kolumnie przerywa budowę,
+    przy częściowych brakach ostrzega. Chroni przed cichym zbudowaniem zbioru, w
+    którym np. płeć albo wiek są w całości puste.
+    """
+    n = dataset.height
+    if n == 0:
+        return
+    for col, label in _CLINICAL_COVARIATE_LABELS.items():
+        if col not in dataset.columns:
+            continue
+        filled = int(dataset[col].is_not_null().sum())
+        frac = filled / n
+        if frac < _CLINICAL_HARD_MIN:
+            raise SurvivalDatasetError(
+                f"Kolumna kliniczna '{col}' ({label}) jest wypełniona tylko w "
+                f"{frac * 100:.1f}% ({filled}/{n}) — dane kliniczne są niekompletne "
+                f"(częsty objaw niepełnego eksportu z API GDC). Zbuduj zbiór z pełnego "
+                f"clinical.tsv (eksport 'cart' z portalu GDC) albo napraw istniejący "
+                f"zbiór komendą `repair-clinical`."
+            )
+        if frac < _CLINICAL_SOFT_MIN:
+            print(
+                f"survival_dataset: UWAGA — kolumna '{col}' ({label}) wypełniona w "
+                f"{frac * 100:.1f}% ({filled}/{n}); część próbek będzie miała braki "
+                f"kliniczne. Sprawdź, czy klinika pochodzi z pełnego clinical.tsv.",
+                file=sys.stderr,
+            )
+
+
 def build_survival_dataset(
     expression_matrix: pl.DataFrame,
     sample_sheet: pl.DataFrame,
@@ -191,6 +235,8 @@ def build_survival_dataset(
                 f"Po filtrze krótkich cenzur (min_follow_up_days={min_follow_up_days}) "
                 f"nie pozostała żadna próbka"
             )
+
+    _check_clinical_completeness(dataset)
 
     ordered_columns = METADATA_COLUMNS + genes
     return dataset.select(ordered_columns).sort("sample_id")

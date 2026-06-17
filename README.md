@@ -496,6 +496,14 @@ W manifeście (nie w danych): regularyzacja przy p≫n/EPV, wagi klas przy nier�
 stadiów, korekta batchu (ComBat / TSS jako kowarianta) i GroupKFold do walidacji — to
 decyzje modelowe, których wpiekanie w zbiór dałoby przeciek albo utratę informacji.
 
+**Kontrola kompletności danych klinicznych.** Budowa zbioru przeżywalności ma
+strażnika: po złączeniu kliniki sprawdza wypełnienie kowariantów (wiek, płeć,
+stadium). Gdy kolumna jest praktycznie pusta (typowy objaw niepełnego eksportu z API
+GDC), build **przerywa się z jasnym komunikatem** zamiast po cichu wyprodukować
+wadliwy zbiór; przy częściowych brakach ostrzega. Pełny, kompletny eksport uzyskuje
+się z `clinical.tsv` (eksport „cart" z portalu GDC); istniejący zbiór z pustą kolumną
+naprawia komenda `repair-clinical`.
+
 ## Konfiguracja
 
 Wszystkie komendy akceptują opcjonalną flagę `--config PATH` do pliku YAML.
