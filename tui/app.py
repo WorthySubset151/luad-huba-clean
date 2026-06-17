@@ -43,6 +43,10 @@ from src.ingest.star_parser import parse_star_counts, StarParserError  # noqa: E
 from src.ingest.file_naming import STAR_FILE_PATTERNS, extract_star_file_stem  # noqa: E402
 from src.transform.expression_matrix import build_expression_matrix  # noqa: E402
 from src.transform.survival_dataset import build_survival_dataset  # noqa: E402
+from src.ingest.gdc_client import (  # noqa: E402
+    build_files_filter, query_files, parse_files_response, download_files, GDCClientError,
+)
+from src.ingest.cases_client import query_cases, parse_cases_response, CasesClientError  # noqa: E402
 from src.cli_config import resolve_metric, ConfigError  # noqa: E402
 import yaml  # noqa: E402
 from tui import render  # noqa: E402
@@ -66,6 +70,7 @@ MENU = [
     ("6", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
     ("7", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
     ("8", "DATASET", "Budowa zbioru przeżywalności (macierz + clinical → parquet)", "dataset"),
+    ("9", "DOWNLOAD", "Pobieranie z GDC API (metadane + pliki STAR + clinical)", "download"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -596,6 +601,156 @@ class BuildSurvivalScreen(Screen):
             Text(f"Błąd budowy zbioru:\n  {msg}", style=render.RISK))
 
 
+class GDCDownloadScreen(Screen):
+    """Pobieranie z GDC API: metadane (PF4) + pliki STAR + sheet + clinical (PF5) w workerze."""
+
+    PANEL_ID = "LUADHUB.GDC"
+    TITLE_TXT = "DOWNLOAD — POBIERANIE Z GDC"
+    BINDINGS = [
+        Binding("f4", "check", "PF4 Sprawdź"),
+        Binding("f5", "download", "PF5 Pobierz"),
+        Binding("f3,escape", "app.pop_screen", "PF3 Koniec"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield PanelHeader(self.PANEL_ID, self.TITLE_TXT)
+        with Vertical(id="gdc-wrap"):
+            yield Static(self._intro(), id="gdc-intro")
+            with Horizontal(classes="gdc-row"):
+                yield Label("Projekt   ===> ", classes="gdc-lab")
+                yield Input(value="TCGA-LUAD", id="gdc-project")
+            with Horizontal(classes="gdc-row"):
+                yield Label("Workflow  ===> ", classes="gdc-lab")
+                yield Input(value="STAR - Counts", id="gdc-workflow")
+            with Horizontal(classes="gdc-row"):
+                yield Label("Plików    ===> ", classes="gdc-lab")
+                yield Input(value="10", id="gdc-nfiles")
+            yield ProgressBar(id="gdc-progress", show_eta=False)
+            yield Static(id="gdc-status")
+        yield Footer()
+
+    def _intro(self):
+        return Text.assemble(
+            ("Pobieranie TCGA z Genomic Data Commons (podzbiory; pełna kohorta → CLI).\n",
+             render.HEAD),
+            ("PF4 sprawdza metadane (szybkie). PF5 pobiera pliki STAR + sample sheet + clinical.\n",
+             render.DIM),
+            ("ZAPIS: data/raw/ (uploaded_star/, gdc_sample_sheet.tsv, clinical.tsv).", render.DIM),
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#gdc-progress", ProgressBar).display = False
+        self.query_one("#gdc-project", Input).focus()
+
+    def _params(self):
+        project = self.query_one("#gdc-project", Input).value.strip() or "TCGA-LUAD"
+        workflow = self.query_one("#gdc-workflow", Input).value.strip() or "STAR - Counts"
+        raw_n = self.query_one("#gdc-nfiles", Input).value.strip()
+        try:
+            n = max(1, int(raw_n))
+        except ValueError:
+            n = 10
+        return project, workflow, n
+
+    # --- Krok 1: sprawdzenie dostępności (metadane) ---
+    def action_check(self) -> None:
+        if self._busy:
+            return
+        project, workflow, _ = self._params()
+        self._busy = True
+        self.query_one("#gdc-status", Static).update(
+            Text(f"Zapytanie do GDC o metadane ({project})…", style=render.GREEN))
+        self._check_worker(project, workflow)
+
+    @work(thread=True, exclusive=True)
+    def _check_worker(self, project, workflow) -> None:
+        try:
+            filt = build_files_filter(project_id=project, workflow_type=workflow)
+            response = query_files(filters=filt, size=10000)
+            meta = parse_files_response(response)
+            total = response.get("data", {}).get("pagination", {}).get("total", 0)
+            total_mb = meta["file_size"].sum() / 1024 ** 2 if "file_size" in meta.columns else 0
+            self.app.call_from_thread(self._check_done, meta.height, total, total_mb)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(self._fail, f"{type(exc).__name__}: {exc}")
+
+    def _check_done(self, n_in_resp: int, total: int, total_mb: float) -> None:
+        self._busy = False
+        self.query_one("#gdc-status", Static).update(Text(
+            f"Dostępnych plików: {total}  (w odpowiedzi: {n_in_resp})  ·  ≈ {total_mb:.0f} MB\n"
+            "Ustaw liczbę i naciśnij PF5 aby pobrać.", style=render.GREEN))
+
+    # --- Krok 2: pobieranie ---
+    def action_download(self) -> None:
+        if self._busy:
+            return
+        project, workflow, n = self._params()
+        self._busy = True
+        pbar = self.query_one("#gdc-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=n, progress=0)
+        warn = "  (uwaga: dużo plików przez sieć bywa zawodne — dla pełnej kohorty CLI)" if n > 50 else ""
+        self.query_one("#gdc-status", Static).update(
+            Text(f"Pobieranie {n} plików STAR + sheet + clinical…{warn}", style=render.GREEN))
+        self._download_worker(project, workflow, n)
+
+    @work(thread=True, exclusive=True)
+    def _download_worker(self, project, workflow, n) -> None:
+        msgs = []
+        try:
+            from src.cli import _write_sample_sheet, _write_metadata_cart
+            DATA_RAW.mkdir(parents=True, exist_ok=True)
+            filt = build_files_filter(project_id=project, workflow_type=workflow)
+            response = query_files(filters=filt, size=n)
+            files_meta = parse_files_response(response).head(n)
+            msgs.append(f"metadane: {files_meta.height} plików")
+
+            _write_sample_sheet(files_meta, DATA_RAW / "gdc_sample_sheet.tsv")
+            _write_metadata_cart(response, DATA_RAW / "metadata.cart.json")
+            msgs.append("zapisano gdc_sample_sheet.tsv")
+
+            try:
+                resp_cases = query_cases(size=10000)
+                cases_df = parse_cases_response(resp_cases)
+                cases_df.write_csv(DATA_RAW / "clinical.tsv", separator="\t", quote_style="never")
+                msgs.append(f"zapisano clinical.tsv ({cases_df.height} wierszy)")
+            except CasesClientError as exc:
+                msgs.append(f"clinical pominięte: {exc}")
+
+            def on_progress(idx, total, name):
+                self.app.call_from_thread(self._tick, idx, total, name)
+
+            report = download_files(
+                metadata=files_meta, output_dir=DATA_RAW / "uploaded_star",
+                show_progress=False, progress_callback=on_progress,
+            )
+            n_ok = report.filter(pl.col("verified")).height
+            msgs.append(f"pobrano {n_ok}/{report.height} STAR (MD5 OK)")
+            self.app.call_from_thread(self._download_done, msgs)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(self._fail, f"{type(exc).__name__}: {exc}\n  " + " · ".join(msgs))
+
+    def _tick(self, idx: int, total: int, name: str) -> None:
+        self.query_one("#gdc-progress", ProgressBar).update(total=total, progress=idx)
+        self.query_one("#gdc-status", Static).update(
+            Text(f"Pobieranie {idx}/{total}: {name}", style=render.DIM))
+
+    def _download_done(self, msgs: list) -> None:
+        self._busy = False
+        self.query_one("#gdc-status", Static).update(
+            Text("✓ " + "\n  ".join(msgs) + "\n→ data/raw/", style=render.GREEN))
+
+    def _fail(self, msg: str) -> None:
+        self._busy = False
+        self.query_one("#gdc-progress", ProgressBar).display = False
+        self.query_one("#gdc-status", Static).update(
+            Text(f"Błąd GDC:\n  {msg}", style=render.RISK))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -654,6 +809,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(BuildMatrixScreen())
         elif action == "dataset":
             self.app.push_screen(BuildSurvivalScreen())
+        elif action == "download":
+            self.app.push_screen(GDCDownloadScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
