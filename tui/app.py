@@ -22,11 +22,14 @@ if str(PROJECT_ROOT) not in sys.path:
 import polars as pl  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
+from textual import work  # noqa: E402
 from textual.app import App, ComposeResult  # noqa: E402
 from textual.binding import Binding  # noqa: E402
 from textual.containers import Horizontal, Vertical, VerticalScroll  # noqa: E402
 from textual.screen import Screen  # noqa: E402
-from textual.widgets import Footer, Input, Label, ListItem, ListView, Static  # noqa: E402
+from textual.widgets import (  # noqa: E402
+    Footer, Input, Label, ListItem, ListView, ProgressBar, Static,
+)
 
 from src.analysis import survival_report as sr  # noqa: E402
 from src.analysis.expression_report import expression_summary, LUAD_MARKERS  # noqa: E402
@@ -35,6 +38,8 @@ from src.validate.runner import run_cohort_qc, discover_stems  # noqa: E402
 from src.validate.report_view import classify_qc  # noqa: E402
 from src.ingest.sample_sheet_parser import parse_sample_sheet  # noqa: E402
 from src.ingest.clinical_parser import parse_clinical  # noqa: E402
+from src.ingest.star_parser import parse_star_counts, StarParserError  # noqa: E402
+from src.ingest.file_naming import STAR_FILE_PATTERNS, extract_star_file_stem  # noqa: E402
 import yaml  # noqa: E402
 from tui import render  # noqa: E402
 
@@ -54,6 +59,7 @@ MENU = [
     ("3", "EXPRESSION", "Macierz ekspresji (rozkład, batch TSS, PCA)", "expression"),
     ("4", "VALIDATE", "Walidacja kohorty (QC — spójność próbek/klinika)", "validate"),
     ("5", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
+    ("6", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -246,6 +252,107 @@ class ConfigScreen(ReportScreen):
         content.update(render.config_report(_read_config()))
 
 
+def _discover_star_files_at(path: Path) -> list:
+    """Pliki STAR pod ścieżką: pojedynczy plik albo rekurencyjnie z katalogu."""
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        found = set()
+        for pattern in STAR_FILE_PATTERNS:
+            found.update(path.rglob(pattern))
+        return sorted(found)
+    return []
+
+
+class IngestScreen(Screen):
+    """Parsowanie STAR-Counts po ścieżce → data/interim (worker w tle + progress)."""
+
+    PANEL_ID = "LUADHUB.INGE"
+    TITLE_TXT = "INGEST — PARSOWANIE STAR PO ŚCIEŻCE"
+    BINDINGS = [
+        Binding("f3,escape", "app.pop_screen", "PF3 Koniec"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield PanelHeader(self.PANEL_ID, self.TITLE_TXT)
+        with Vertical(id="ingest-wrap"):
+            yield Static(self._intro(), id="ingest-intro")
+            with Horizontal(id="ingest-cmdline"):
+                yield Label("Ścieżka ===> ", id="ingest-label")
+                yield Input(
+                    id="ingest-path",
+                    placeholder="katalog (rekurencyjnie) lub plik STAR .tsv — Enter parsuje",
+                )
+            yield ProgressBar(id="ingest-progress", show_eta=False)
+            yield Static(id="ingest-status")
+        yield Footer()
+
+    def _intro(self):
+        return Text.assemble(
+            ("Surowe STAR-Counts (TSV) → data/interim/star_counts/*.parquet\n", render.HEAD),
+            ("ZAPIS na dysk: istniejące parquety o tej samej nazwie zostaną nadpisane.\n", render.DIM),
+            (f"Wzorce: {'  '.join(STAR_FILE_PATTERNS)}", render.DIM),
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#ingest-progress", ProgressBar).display = False
+        self.query_one("#ingest-path", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip()
+        if not raw:
+            return
+        self._start(Path(raw).expanduser())
+
+    def _start(self, path: Path) -> None:
+        status = self.query_one("#ingest-status", Static)
+        files = _discover_star_files_at(path)
+        if not files:
+            status.update(Text(
+                f"Brak plików STAR pod:\n  {path}\nWzorce: {'  '.join(STAR_FILE_PATTERNS)}",
+                style=render.RISK))
+            return
+        pbar = self.query_one("#ingest-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=len(files), progress=0)
+        status.update(Text(f"Znaleziono {len(files)} plików — parsowanie…", style=render.GREEN))
+        self.query_one("#ingest-path", Input).disabled = True
+        self._parse_worker(files)
+
+    @work(thread=True, exclusive=True)
+    def _parse_worker(self, files: list) -> None:
+        DATA_INTERIM.mkdir(parents=True, exist_ok=True)
+        errors = []
+        for done, path in enumerate(files, start=1):
+            try:
+                df = parse_star_counts(path)
+                df.write_parquet(DATA_INTERIM / f"{extract_star_file_stem(path)}.parquet")
+            except (StarParserError, FileNotFoundError, OSError) as exc:
+                errors.append(f"{path.name}: {exc}")
+            self.app.call_from_thread(self._tick, done, path.name)
+        self.app.call_from_thread(self._done, len(files), errors)
+
+    def _tick(self, done: int, name: str) -> None:
+        self.query_one("#ingest-progress", ProgressBar).progress = done
+        self.query_one("#ingest-status", Static).update(
+            Text(f"Przetworzono {done} — ostatni: {name}", style=render.DIM))
+
+    def _done(self, total: int, errors: list) -> None:
+        self.query_one("#ingest-path", Input).disabled = False
+        status = self.query_one("#ingest-status", Static)
+        ok = total - len(errors)
+        if errors:
+            lines = "\n".join(f"  • {e}" for e in errors[:15])
+            more = f"\n  … oraz {len(errors) - 15} więcej" if len(errors) > 15 else ""
+            status.update(Text(
+                f"Zakończono: {ok}/{total} OK, {len(errors)} błędów\n{lines}{more}",
+                style=render.WARN if ok else render.RISK))
+        else:
+            status.update(Text(
+                f"✓ Sparsowano {total} plików → data/interim/star_counts/",
+                style=render.GREEN))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -298,6 +405,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(ValidateScreen())
         elif action == "config":
             self.app.push_screen(ConfigScreen())
+        elif action == "ingest":
+            self.app.push_screen(IngestScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
