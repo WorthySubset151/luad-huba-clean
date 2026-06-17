@@ -584,3 +584,98 @@ Kluczowe zależności: `polars` (przetwarzanie danych), `typer` (CLI),
 (współbieżny klient GDC z ponawianiem), `plotly` (wizualizacje), `lifelines`
 i `scikit-survival` (analiza przeżywalności), `scipy` (statystyka: FDR,
 Schoenfeld), `pyarrow` (parquet).
+
+
+## Przewodnik po dashboardzie analitycznym
+
+Dashboard ma trzy zakładki: **Przeżywalność** (jakość etykiety/targetu), **Ekspresja**
+(jakość cech/features) i **Gotowość ML** (ilościowa ocena przydatności danych pod modele).
+Na ekranie pod każdym wykresem jest tylko jednozdaniowy podpis, żeby zachować czytelność —
+pełne wyjaśnienia (co pokazuje, po co jest, jak je czytać, co znaczy dla ML) są tutaj.
+
+### Zakładka Przeżywalność — jakość etykiety (target)
+
+**Kaplan-Meier — cała kohorta.** Krzywa przeżycia całej kohorty (odsetek żyjących w czasie),
+z 95% pasem ufności. *Po co:* baseline przed podziałem na grupy; mediana OS i przeżycia
+1/3/5-letnie porównywalne z literaturą. *Jak czytać:* każdy schodek to zgon; im wolniej opada,
+tym lepsze rokowanie; pas rozszerza się na końcu (mniej obserwowanych). *Pod ML:* to rozkład
+zmiennej celu — zdarzenia, nie cenzury, niosą sygnał uczący, więc ich liczba wyznacza realną moc.
+
+**Kaplan-Meier — per stadium.** Krzywe rozbite na stadia AJCC I–IV + test log-rank. *Po co:*
+sanity check etykiety — najsilniejszy znany czynnik (stadium) musi rozdzielać przeżycie.
+*Jak czytać:* wachlarz krzywych (I najwyżej, IV najniżej); p<0,05 = istotne. *Pod ML:* dowód,
+że target niesie wyuczalny sygnał; sensowny model na ekspresji powinien pobić ten kliniczny baseline.
+
+**Model Coxa — kowarianty kliniczne.** Proporcjonalne hazardy (wiek, płeć, stadium): wkład
+każdego czynnika w ryzyko zgonu, forest plot HR z CI. *Po co:* baseline predykcyjny na samej
+klinice — poprzeczka dla ekspresji. *Jak czytać:* HR>1 ryzyko, HR<1 ochronny; CI przez 1 =
+nieistotny; C-index 0,5 losowy, 1,0 idealny (klinika ~0,6–0,7). *Pod ML:* benchmark oraz wskazówka,
+które kowarianty kontrolować, by sygnał genów nie był przebraniem za stadium.
+
+**Kaplan-Meier — sygnatura wielogenowa.** Podział high/low wg score 7-genowego panelu. *Po co:*
+czy ekspresja (a nie klinika) rozdziela przeżycie. *Jak czytać:* rozjazd krzywych = sygnatura
+różnicuje rokowanie; p<0,05 istotne. *Pod ML:* dowód, że cechy korelują z targetem; score liczony
+a priori — bez douczania na tych danych, więc bez wycieku informacji.
+
+**Kaplan-Meier — pojedynczy gen.** Dla wybranego genu: przeżycie high/low względem mediany +
+charakterystyka genu. *Po co:* eksploracja pojedynczych cech. *Jak czytać:* rozjazd + log-rank p;
+pojedynczy gen rzadko silny, wiele testów = ryzyko fałszywych trafień (stąd FDR niżej). *Pod ML:*
+univariate screening — ale nie selekcjonuj cech po tych p (przeuczenie); od tego jest walidacja krzyżowa.
+
+**Kaplan-Meier — porównanie wielu genów.** Krzywe grup „high" kilku genów naraz + tabela log-rank.
+*Po co:* szybkie porównanie siły prognostycznej. *Jak czytać:* niżej leżąca krzywa „high" = wyższa
+ekspresja wiąże się z gorszym rokowaniem; testy wciąż uniwariackie. *Pod ML:* wstępny ranking cech;
+zgodność z biologią (proliferacyjne = ryzyka, różnicowania = ochronne) buduje zaufanie do featurów.
+
+**Model Coxa — klinika + panel genów.** Łączy klinikę i geny, porównuje C-index (klinika vs
+klinika+geny), forest plot HR genów po korekcie o klinikę. *Po co:* kluczowe pytanie — czy ekspresja
+dodaje wartość PONAD klinikę. *Jak czytać:* patrz na Δ C-index; pojedyncze geny bywają nieistotne,
+a model i tak lepszy (sygnał w kombinacji); uwaga na kolinearność. *Pod ML:* najmocniejszy argument
+za sensem modelu na ekspresji; Δ C-index to uczciwa miara wartości dodanej.
+
+**Rygor statystyczny.** (a) Korekcja wielokrotnego testowania Benjamini-Hochberg (FDR) na panelu
+7 genów; (b) sensitivity analysis Schoenfelda — jaki HR da się wykryć przy danej liczbie zdarzeń.
+*Po co:* uczciwość — część „istotnych" trafień z 7 testów to przypadek; sensitivity zastępuje nieważny
+post-hoc power. *Jak czytać:* q(FDR)<α = istotne po korekcie; min. wykrywalny HR to próg czułości.
+*Pod ML:* realistyczny sufit (wykryjesz HR≥~1,5, słabszych nie); FDR to ta sama dyscyplina co przy
+feature selection.
+
+### Zakładka Ekspresja — jakość cech (features)
+
+**Podsumowanie macierzy.** Wymiar (geny × próbki), wykryta metryka normalizacji, mediana, % zer,
+głębokość. *Po co:* format i jakość cech; metryka decyduje o porównywalności między próbkami. *Jak
+czytać:* TPM porównywalne między próbkami, FPKM zbliżone, counts surowe; zera ~13% to normalna
+rzadkość; filtr biotypów = mniej szumu. *Pod ML:* niezależnie od metryki log2(x+1) stabilizuje
+wariancję; wysoka rzadkość → modele odporne na zera/regularyzacja; FPKM → rozważ TPM.
+
+**Rozkład ekspresji (histogram).** Histogram log2(TPM+1) jednej próbki + jej dane kliniczne. *Po co:*
+kontrola jakości pojedynczej próbki. *Jak czytać:* zdrowy profil jest bimodalny (pik przy 0 = geny
+wyłączone, garb wyżej = aktywne); brak drugiego garbu = próbka podejrzana. *Pod ML:* wykrywanie
+odstających próbek zanim trafią do treningu; log-transformacja to typowy preprocessing.
+
+**Ekspresja markerów LUAD (boxplot).** Rozkład markerów (EGFR, KRAS, TP53, ALK, NKX2-1, SFTPC…) po
+próbkach. *Po co:* walidacja biologiczna — czy markery zachowują się zgodnie z wiedzą. *Jak czytać:*
+NKX2-1/SFTPC zwykle wysokie, ALK/ROS1 (działają przez fuzje) zwykle niskie; rażące odstępstwa =
+problem z macierzą/anotacją. *Pod ML:* sanity check cech — potwierdza, że kolumny to realnie geny,
+a nie artefakt mapowania.
+
+**Batch — ośrodki TSS.** Liczba próbek per ośrodek (TSS z barkodu TCGA), słupki posortowane. *Po co:*
+wykrycie efektu batch — największego ryzyka confoundingu w danych wieloośrodkowych. *Jak czytać:*
+silna nierównowaga = ryzyko, zwłaszcza gdy ośrodek koreluje z targetem. *Pod ML:* batch może wyciekać
+do modelu (batch leakage); środki zaradcze: ComBat/limma, TSS jako kowarianta, sprawdzenie PCA.
+
+**PCA — wariancja składowych.** Ile zmienności tłumaczy każda składowa (PC1–5), po log2 + z-score. *Po
+co:* mapa głównych osi zmienności; czy PC1 to biologia czy artefakt. *Jak czytać:* sam wykres nie mówi,
+co to jest — trzeba nałożyć kolor (stadium/ośrodek); PC1 wg ośrodka = batch (źle), wg stadium = biologia
+(dobrze). *Pod ML:* diagnoza confoundingu; PCA bywa też redukcją wymiaru przed modelem.
+
+### Zakładka Gotowość ML — ocena przydatności pod modele
+
+Zakładka liczy zestaw metryk diagnostycznych i przy każdej pokazuje kontrolkę **🟢 OK / 🟡 wymaga uwagi
+/ 🔴 wymaga działania**, plus zbiorczy werdykt i listę zalecanych kroków przygotowania danych. Grupy
+metryk: **wymiary i reżim uczenia** (liczba próbek i cech, p/n, zdarzeń na cechę EPV), **etykieta**
+(zdarzenia, cenzura, kompletność klinicznych), **balans klas** (nierównowaga stadiów), **jakość cech**
+(metryka normalizacji, rzadkość, geny o zerowej wariancji), **batch/wyciek** (nierównowaga ośrodków TSS
+oraz test „PC1 — biologia czy batch?" liczony jako η²(PC1~stadium) vs η²(PC1~ośrodek)) i **integralność**
+(duplikaty próbek na pacjenta). Metryki liczy `src/analysis/readiness_report.py` (jedno źródło), więc są
+odtwarzalne i niezależne od interfejsu.

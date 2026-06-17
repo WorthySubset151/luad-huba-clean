@@ -39,6 +39,7 @@ import app.dashboard_viz as viz
 # Warstwa analityczna (jedno źródło liczb — spójność GUI z terminalem)
 from src.analysis import survival_report as sr
 from src.analysis.expression_report import expression_summary
+from src.analysis import readiness_report as readiness
 
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
@@ -733,13 +734,9 @@ def _render_sample_clinical(ds, sample_col: str) -> None:
         st.caption(" | ".join(info_parts))
 
 
-def _dash_explain(co, po_co, jak, ml, label="Jak to czytać + co to znaczy dla ML"):
-    """Spójny rozwijany blok pod wykresem: co pokazuje, po co, jak czytać, co dla ML."""
-    with st.expander("📖 " + label):
-        st.markdown("**Co pokazuje.** " + co)
-        st.markdown("**Po co.** " + po_co)
-        st.markdown("**Jak czytać.** " + jak)
-        st.markdown("**Pod ML.** " + ml)
+def _dash_explain(co, po_co=None, jak=None, ml=None, label=None):
+    """Jednozdaniowy podpis pod wykresem (co pokazuje). Pełny przewodnik: README."""
+    st.caption("ℹ️ " + co)
 
 
 def render_dashboard(state: dict) -> None:
@@ -774,36 +771,14 @@ def render_dashboard(state: dict) -> None:
     )
     st.caption(f"Rozkład stadiów (AJCC): {stage_str}")
 
-    st.info(
-        "Ten panel to audyt gotowości danych pod modele ML, nie tylko galeria wykresów. "
-        "Zakładka Przeżywalność bada etykietę (target): czy zmienna celu jest dobrze "
-        "zdefiniowana i niesie sygnał, którego model może się nauczyć. Zakładka Ekspresja "
-        "bada cechy (features): czy ekspresja genów jest czysta, poprawnie znormalizowana "
-        "i wolna od artefaktów technicznych (batch), które model podchwyciłby zamiast "
-        "biologii. Pod każdym wykresem rozwijany blok „📖” tłumaczy, co "
-        "pokazuje, po co jest, jak go czytać i co z niego wynika dla ML."
+    st.caption(
+        "Trzy zakładki: **Przeżywalność** (jakość etykiety), **Ekspresja** (jakość "
+        "cech), **Gotowość ML** (ocena przydatności danych pod modele). Pełny "
+        "przewodnik po wykresach — w README, sekcja „Przewodnik po dashboardzie "
+        "analitycznym”."
     )
-    with st.expander("🎯 Co znaczy „dane gotowe pod ML” — szybka lista kontrolna"):
-        st.markdown("Dane nadają się do uczenia maszynowego, gdy spełnione są poniższe "
-                    "warunki — ten panel pozwala je sprawdzić:")
-        st.markdown("**1. Dobry target.** Etykieta (time/event) jest sensowna, a oczywista "
-                    "zmienna kliniczna (stadium) faktycznie rozdziela przeżycie — wykresy "
-                    "*KM per stadium* i *Cox kliniczny*.")
-        st.markdown("**2. Sygnał w cechach.** Ekspresja koreluje z targetem ponad przypadek "
-                    "— *KM sygnatura*, *porównanie genów*.")
-        st.markdown("**3. Wartość dodana ponad baseline.** Cechy molekularne wnoszą coś PONAD "
-                    "klinikę — *Cox klinika + geny* (Δ C-index).")
-        st.markdown("**4. Realistyczny sufit.** Wiadomo, jak silny efekt da się wykryć przy "
-                    "tej liczbie zdarzeń — *Rygor statystyczny* (sensitivity).")
-        st.markdown("**5. Czyste, porównywalne cechy.** Poprawna normalizacja, zdrowe rozkłady, "
-                    "markery zgodne z biologią — zakładka *Ekspresja*.")
-        st.markdown("**6. Brak wycieku technicznego.** Batch (ośrodek TSS) nie dominuje "
-                    "zmienności i nie koreluje z targetem — *Batch TSS*, *PCA*.")
-        st.markdown("Gdy punkty 1–3 są spełnione, a 6 jest pod kontrolą, dane są dobrym "
-                    "materiałem pod model. Punkt 4 ustawia oczekiwania, czego od modelu "
-                    "realnie wymagać nie można.")
 
-    tab_surv, tab_expr = st.tabs(["Przeżywalność", "Ekspresja"])
+    tab_surv, tab_expr, tab_ml = st.tabs(["Przeżywalność", "Ekspresja", "Gotowość ML"])
 
     # ===== ZAKŁADKA PRZEŻYWALNOŚĆ =====
     with tab_surv:
@@ -1193,6 +1168,57 @@ def render_dashboard(state: dict) -> None:
                         jak="PC1 ≈ 17% — jedna oś umiarkowanie dominuje. Sam wykres NIE mówi, co to jest — trzeba nałożyć kolor: stadium, ośrodek TSS, głębokość. Jeśli punkty układają się wg ośrodka, dominuje batch (źle); jeśli wg stadium — biologia (dobrze).",
                         ml="Diagnoza struktury i confoundingu cech: jeśli największa zmienność jest techniczna, model ją podchwyci, więc najpierw trzeba ją skorygować. PCA bywa też redukcją wymiaru przed modelem (z ~20 tys. genów do kilkudziesięciu składowych), co ogranicza przeuczenie.",
                     )
+
+    # ===== ZAKŁADKA GOTOWOŚĆ ML =====
+    with tab_ml:
+        st.markdown(
+            "**Gotowość danych pod uczenie maszynowe.** Metryki oceniające, czy ta macierz "
+            "ekspresji i etykiety nadają się jako materiał do modeli (docelowo multimodalnych). "
+            "Kontrolki na skróty: 🟢 OK · 🟡 wymaga uwagi · 🔴 wymaga działania."
+        )
+        with st.expander("🎯 Co znaczy „dane gotowe pod ML”"):
+            st.markdown("Dane nadają się do uczenia maszynowego, gdy: **1)** target jest dobrze "
+                        "zdefiniowany i niesie sygnał, **2)** cechy korelują z targetem ponad "
+                        "przypadek, **3)** cechy wnoszą wartość ponad kliniczny baseline, **4)** "
+                        "znany jest realistyczny sufit czułości, **5)** cechy są czyste i "
+                        "porównywalne, **6)** nie ma wycieku technicznego (batch). Metryki poniżej "
+                        "sprawdzają te warunki liczbowo.")
+        _ml_matrix_path = DATA_PROCESSED / "expression_matrix.parquet"
+        _esum_ml = (
+            _expression_summary_cached(str(_ml_matrix_path), _ml_matrix_path.stat().st_mtime)
+            if _ml_matrix_path.exists() else None
+        )
+        try:
+            _report = readiness.ml_readiness_report(ds, _esum_ml)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Błąd oceny gotowości ML: {exc}")
+            _report = None
+        if _report:
+            _summ = _report["summary"]
+            _dot = {"green": "🟢", "yellow": "🟡", "red": "🔴", "info": "⚪"}
+            _vline = f"{_dot[_summ['verdict_status']]} {_summ['verdict']}"
+            if _summ["verdict_status"] == "green":
+                st.success(_vline)
+            elif _summ["verdict_status"] == "yellow":
+                st.warning(_vline)
+            else:
+                st.error(_vline)
+            st.caption(
+                f"Kontrolki:   🟢 {_summ['green']}    🟡 {_summ['yellow']}    🔴 {_summ['red']}"
+            )
+            if _summ["actions"]:
+                with st.expander("🔧 Zalecane kroki przygotowania danych pod ML", expanded=True):
+                    for _a in _summ["actions"]:
+                        st.markdown("- " + _a)
+            for _grp in _report["groups"]:
+                if not _grp["metrics"]:
+                    continue
+                st.subheader(_grp["title"])
+                for _m in _grp["metrics"]:
+                    st.markdown(f"{_dot[_m['status']]} **{_m['label']}:** {_m['value']}")
+                    _tail = _m["note"] + ("  ·  ➜ " + _m["action"] if _m["action"] else "")
+                    st.caption(_tail)
+
 
 def _detect_file_type(content: bytes) -> str:
     """Rozpoznaje typ wgranego pliku po sygnaturze nagłówka.
