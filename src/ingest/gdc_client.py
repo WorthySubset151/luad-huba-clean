@@ -8,6 +8,7 @@ pobieranie plików z weryfikacją sum kontrolnych MD5.
 
 __author__ = "Łukasz Połaski"
 
+import asyncio
 import hashlib
 import json
 import re
@@ -15,10 +16,15 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 import polars as pl
-import requests
-import urllib.error
-import urllib.request
+from tenacity import (
+    AsyncRetrying,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 from tqdm import tqdm
 
 
@@ -89,6 +95,45 @@ class GDCClientError(Exception):
     """Błąd komunikacji z GDC API lub parsowania odpowiedzi."""
 
 
+DEFAULT_MAX_CONCURRENCY = 15  # ile plików pobierać równolegle (semafor)
+
+# Kody HTTP i wyjątki traktowane jako przejściowe (warte ponowienia).
+_TRANSIENT_STATUS: set[int] = {429, 500, 502, 503, 504}
+_TRANSIENT_HTTPX_EXC = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+    httpx.NetworkError,
+)
+
+
+class _RetryableMD5Error(Exception):
+    """Niezgodność MD5 — pobranie uszkodzone, warto ponowić."""
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Czy błąd jest przejściowy (timeout, zerwane połączenie, 5xx/429, zła suma MD5).
+
+    Błędy 4xx poza 429 NIE są przejściowe — ponawianie 404/400 nie ma sensu,
+    tylko maskuje realny problem i marnuje czas.
+    """
+    if isinstance(exc, _RetryableMD5Error):
+        return True
+    if isinstance(exc, _TRANSIENT_HTTPX_EXC):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _TRANSIENT_STATUS
+    return False
+
+
+def _retry_wait():
+    """Exponential backoff: ~2s, 4s, 8s… z górnym limitem 30s."""
+    return wait_exponential(multiplier=1, min=2, max=30)
+
+
 def build_files_filter(
     project_id: str = DEFAULT_PROJECT_ID,
     workflow_type: str = DEFAULT_WORKFLOW_TYPE,
@@ -141,24 +186,30 @@ def query_files(
     size: int = DEFAULT_PAGE_SIZE,
     page_from: int = 0,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    project_id: str = DEFAULT_PROJECT_ID,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    _transport: "httpx.BaseTransport | None" = None,
 ) -> dict[str, Any]:
-    """Wykonuje zapytanie do endpointu /files w GDC API.
+    """Wykonuje zapytanie do endpointu /files w GDC API (httpx + retry).
 
     Argumenty:
-        filters: filtr w formacie GDC (jeśli None - bierze build_files_filter()).
+        filters: filtr w formacie GDC. Jeśli None — budowany z project_id.
         fields: lista pól do zwrócenia (jeśli None - bierze DEFAULT_FIELDS).
         size: liczba wyników w odpowiedzi (max MAX_PAGE_SIZE).
         page_from: offset paginacji (0-based).
         timeout: timeout w sekundach.
+        project_id: projekt do filtra, gdy filters=None (domyślnie TCGA-LUAD).
+            Pozwala odpytać dowolny projekt (BRCA, GBM, …) bez zmiany kodu.
+        max_retries: liczba prób przy błędach przejściowych (5xx/timeout).
 
     Zwraca:
         Surowy JSON z odpowiedzi GDC: {"data": {"hits": [...], "pagination": {...}}}.
 
     Rzuca:
-        GDCClientError: timeout, błąd HTTP, niepoprawny JSON.
+        GDCClientError: błąd HTTP (po wyczerpaniu prób), połączenia lub JSON.
     """
     if filters is None:
-        filters = build_files_filter()
+        filters = build_files_filter(project_id=project_id)
     if fields is None:
         fields = DEFAULT_FIELDS
 
@@ -175,30 +226,30 @@ def query_files(
         "format": "JSON",
     }
 
-    request_body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        FILES_ENDPOINT,
-        data=request_body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    def _post() -> httpx.Response:
+        with httpx.Client(transport=_transport, timeout=timeout) as client:
+            response = client.post(FILES_ENDPOINT, json=payload)
+        response.raise_for_status()
+        return response
+
+    retryer = Retrying(
+        retry=retry_if_exception(_is_transient),
+        stop=stop_after_attempt(max_retries),
+        wait=_retry_wait(),
+        reraise=True,
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_bytes = response.read()
-    except urllib.error.HTTPError as exc:
+        response = retryer(_post)
+    except httpx.HTTPStatusError as exc:
         raise GDCClientError(
-            f"GDC API zwróciło HTTP {exc.code}: {exc.reason}"
+            f"GDC API zwróciło HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
         ) from exc
-    except urllib.error.URLError as exc:
-        raise GDCClientError(f"Nie można połączyć się z {FILES_ENDPOINT}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise GDCClientError(
-            f"Timeout po {timeout}s przy zapytaniu do {FILES_ENDPOINT}"
-        ) from exc
+    except httpx.HTTPError as exc:
+        raise GDCClientError(f"Nie można połączyć się z {FILES_ENDPOINT}: {exc}") from exc
 
     try:
-        return json.loads(response_bytes.decode("utf-8"))
+        return response.json()
     except json.JSONDecodeError as exc:
         raise GDCClientError(f"Niepoprawny JSON w odpowiedzi GDC API: {exc}") from exc
 
@@ -327,27 +378,31 @@ def download_files(
     show_progress: bool = True,
     skip_existing: bool = True,
     progress_callback: "Callable[[int, int, str], None] | None" = None,
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    _transport: "httpx.AsyncBaseTransport | None" = None,
 ) -> pl.DataFrame:
-    """Pobiera pliki z GDC i weryfikuje sumy kontrolne MD5.
+    """Pobiera pliki z GDC współbieżnie (httpx.AsyncClient) i weryfikuje MD5.
 
-    Pobieranie odbywa się per-plik przez GET /data/<file_id>. Dla każdego pliku
-    obliczana jest suma MD5 w trakcie pobierania (streaming, bez ładowania do
-    pamięci) i porównywana z wartością z kolumny md5sum w DataFrame. Przy
-    niezgodności lub błędzie sieci następuje retry z exponential backoff.
+    Pliki pobierane są równolegle — do max_concurrency naraz (semafor), co
+    skraca czas z godzin do minut przy setkach plików. Każde pobranie jest
+    streamowane (MD5 liczone w locie, bez ładowania całości do pamięci), a przy
+    błędach przejściowych (timeout, zerwane połączenie, 5xx/429, zła suma MD5)
+    ponawiane z exponential backoff (tenacity). Błędy 4xx nie są ponawiane.
 
     Argumenty:
         metadata: DataFrame z kolumną file_id (wymagana), opcjonalnie md5sum
-            do weryfikacji i file_name (jeśli nie ma, nazwa pochodzi z headera
-            Content-Disposition GDC).
+            (weryfikacja) i file_name (inaczej z nagłówka Content-Disposition).
         output_dir: katalog docelowy. Utworzony jeśli nie istnieje.
         max_retries: maksymalna liczba prób per plik (domyślnie 3).
         timeout: timeout per zapytanie HTTP w sekundach (domyślnie 300).
         show_progress: czy pokazywać pasek postępu tqdm.
         skip_existing: jeśli True, pomija pliki które już istnieją lokalnie
             z poprawnym MD5 (idempotentność, można wznowić przerwane pobieranie).
-        progress_callback: opcjonalna funkcja wywoływana po każdym pliku z
-            argumentami (numer_pliku, liczba_plikow, nazwa_pliku). Używana przez
-            GUI do paska postępu (CLI używa show_progress z tqdm).
+        progress_callback: opcjonalna funkcja wywoływana po każdym ukończonym
+            pliku z argumentami (ukończone, wszystkie, nazwa). Kolejność jest
+            niedeterministyczna przy współbieżności. Używana przez GUI/terminal.
+        max_concurrency: ile plików pobierać równolegle (domyślnie 15).
+        _transport: wewnętrzne — transport httpx do wstrzyknięcia w testach.
 
     Zwraca:
         DataFrame z raportem pobierania, jeden wiersz per plik:
@@ -363,33 +418,75 @@ def download_files(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    has_md5 = "md5sum" in metadata.columns
-    has_filename = "file_name" in metadata.columns
+    bar = (
+        tqdm(total=metadata.height, desc="Pobieranie z GDC", unit="plik")
+        if show_progress else None
+    )
 
-    results = []
-    rows = metadata.iter_rows(named=True)
-    if show_progress:
-        rows = tqdm(rows, total=metadata.height, desc="Pobieranie z GDC", unit="plik")
-
-    total = metadata.height
-    for idx, row in enumerate(rows, start=1):
-        result = _download_one_file(
-            file_id=row["file_id"],
-            expected_md5=row.get("md5sum") if has_md5 else None,
-            expected_name=row.get("file_name") if has_filename else None,
-            output_dir=output_dir,
-            max_retries=max_retries,
-            timeout=timeout,
-            skip_existing=skip_existing,
-        )
-        results.append(result)
+    def _on_done(done: int, total: int, name: str) -> None:
+        if bar is not None:
+            bar.update(1)
         if progress_callback is not None:
-            progress_callback(idx, total, result.get("file_name", ""))
+            progress_callback(done, total, name)
+
+    try:
+        results = asyncio.run(
+            _download_all_async(
+                metadata, output_dir, max_retries, timeout,
+                max_concurrency, skip_existing, _on_done, _transport,
+            )
+        )
+    finally:
+        if bar is not None:
+            bar.close()
 
     return pl.DataFrame(results).select(DOWNLOAD_RESULT_COLUMNS)
 
 
-def _download_one_file(
+async def _download_all_async(
+    metadata, output_dir, max_retries, timeout,
+    max_concurrency, skip_existing, on_done, transport,
+):
+    """Orkiestracja współbieżna: semafor + asyncio.gather, kolejność wyników zachowana."""
+    rows = list(metadata.iter_rows(named=True))
+    has_md5 = "md5sum" in metadata.columns
+    has_name = "file_name" in metadata.columns
+    total = len(rows)
+    results: list = [None] * total
+    done = {"n": 0}
+    sem = asyncio.Semaphore(max_concurrency)
+    limits = httpx.Limits(
+        max_connections=max_concurrency,
+        max_keepalive_connections=max_concurrency,
+    )
+
+    async with httpx.AsyncClient(
+        follow_redirects=True, limits=limits, transport=transport,
+    ) as client:
+
+        async def worker(idx: int, row: dict) -> None:
+            async with sem:
+                res = await _download_one_async(
+                    client=client,
+                    file_id=row["file_id"],
+                    expected_md5=row.get("md5sum") if has_md5 else None,
+                    expected_name=row.get("file_name") if has_name else None,
+                    output_dir=output_dir,
+                    max_retries=max_retries,
+                    timeout=timeout,
+                    skip_existing=skip_existing,
+                )
+            results[idx] = res
+            done["n"] += 1
+            on_done(done["n"], total, res.get("file_name", ""))
+
+        await asyncio.gather(*(worker(i, r) for i, r in enumerate(rows)))
+
+    return results
+
+
+async def _download_one_async(
+    client: httpx.AsyncClient,
     file_id: str,
     expected_md5: str | None,
     expected_name: str | None,
@@ -398,112 +495,111 @@ def _download_one_file(
     timeout: int,
     skip_existing: bool,
 ) -> dict[str, Any]:
-    """Pobiera pojedynczy plik z retry i weryfikacją MD5."""
-    if expected_name and skip_existing:
-        candidate = output_dir / expected_name
-        if candidate.exists() and expected_md5:
-            existing_md5 = _compute_md5(candidate)
-            if existing_md5 == expected_md5:
-                return {
-                    "file_id": file_id,
-                    "file_name": expected_name,
-                    "local_path": str(candidate),
-                    "expected_md5": expected_md5,
-                    "actual_md5": existing_md5,
-                    "verified": True,
-                    "bytes_downloaded": 0,
-                    "duration_s": 0.0,
-                    "attempts": 0,
-                    "error": "",
-                }
+    """Pobiera pojedynczy plik (stream + MD5) z retry na błędach przejściowych."""
+    existing = _check_existing(file_id, expected_md5, expected_name, output_dir, skip_existing)
+    if existing is not None:
+        return existing
 
     url = f"{DATA_ENDPOINT}/{file_id}"
-    last_error = ""
+    start = time.time()
+    attempts = {"n": 0}
 
-    for attempt in range(1, max_retries + 1):
-        start = time.time()
-        try:
-            with requests.get(url, stream=True, timeout=timeout) as response:
-                response.raise_for_status()
+    async def _attempt() -> dict[str, Any]:
+        attempts["n"] += 1
+        async with client.stream("GET", url, timeout=timeout) as response:
+            response.raise_for_status()
+            filename = _resolve_filename(response, expected_name, file_id)
+            local_path = output_dir / filename
+            tmp_path = local_path.with_suffix(local_path.suffix + ".partial")
+            hasher = hashlib.md5()
+            bytes_downloaded = 0
+            with tmp_path.open("wb") as fh:
+                async for chunk in response.aiter_bytes(DEFAULT_CHUNK_SIZE):
+                    fh.write(chunk)
+                    hasher.update(chunk)
+                    bytes_downloaded += len(chunk)
+            actual_md5 = hasher.hexdigest()
+            if expected_md5 and actual_md5 != expected_md5:
+                tmp_path.unlink(missing_ok=True)
+                raise _RetryableMD5Error(
+                    f"MD5 mismatch: expected {expected_md5}, got {actual_md5}"
+                )
+            tmp_path.rename(local_path)
+            return {
+                "file_name": filename,
+                "local_path": str(local_path),
+                "actual_md5": actual_md5,
+                "bytes_downloaded": bytes_downloaded,
+            }
 
-                filename = _resolve_filename(response, expected_name, file_id)
-                local_path = output_dir / filename
-                tmp_path = local_path.with_suffix(local_path.suffix + ".partial")
+    retryer = AsyncRetrying(
+        retry=retry_if_exception(_is_transient),
+        stop=stop_after_attempt(max_retries),
+        wait=_retry_wait(),
+        reraise=True,
+    )
 
-                hasher = hashlib.md5()
-                bytes_downloaded = 0
-
-                with tmp_path.open("wb") as fh:
-                    for chunk in response.iter_content(chunk_size=DEFAULT_CHUNK_SIZE):
-                        if chunk:
-                            fh.write(chunk)
-                            hasher.update(chunk)
-                            bytes_downloaded += len(chunk)
-
-                actual_md5 = hasher.hexdigest()
-                duration = time.time() - start
-
-                if expected_md5 and actual_md5 != expected_md5:
-                    tmp_path.unlink()
-                    last_error = f"MD5 mismatch: expected {expected_md5}, got {actual_md5}"
-                    if attempt < max_retries:
-                        time.sleep(2 ** attempt)
-                        continue
-                    return {
-                        "file_id": file_id,
-                        "file_name": filename,
-                        "local_path": "",
-                        "expected_md5": expected_md5,
-                        "actual_md5": actual_md5,
-                        "verified": False,
-                        "bytes_downloaded": bytes_downloaded,
-                        "duration_s": duration,
-                        "attempts": attempt,
-                        "error": last_error,
-                    }
-
-                tmp_path.rename(local_path)
-                return {
-                    "file_id": file_id,
-                    "file_name": filename,
-                    "local_path": str(local_path),
-                    "expected_md5": expected_md5 or "",
-                    "actual_md5": actual_md5,
-                    "verified": (actual_md5 == expected_md5) if expected_md5 else True,
-                    "bytes_downloaded": bytes_downloaded,
-                    "duration_s": duration,
-                    "attempts": attempt,
-                    "error": "",
-                }
-
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-
-        except requests.HTTPError as exc:
-            last_error = f"HTTP {exc.response.status_code}: {exc.response.reason}"
-            if exc.response.status_code >= 500 and attempt < max_retries:
-                time.sleep(2 ** attempt)
-                continue
-            break
+    try:
+        ok = await retryer(_attempt)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "file_id": file_id,
+            "file_name": expected_name or "",
+            "local_path": "",
+            "expected_md5": expected_md5 or "",
+            "actual_md5": "",
+            "verified": False,
+            "bytes_downloaded": 0,
+            "duration_s": round(time.time() - start, 3),
+            "attempts": attempts["n"],
+            "error": _format_error(exc),
+        }
 
     return {
         "file_id": file_id,
-        "file_name": expected_name or "",
-        "local_path": "",
+        "file_name": ok["file_name"],
+        "local_path": ok["local_path"],
         "expected_md5": expected_md5 or "",
-        "actual_md5": "",
-        "verified": False,
-        "bytes_downloaded": 0,
-        "duration_s": 0.0,
-        "attempts": max_retries,
-        "error": last_error or "Nieznany błąd po max retries",
+        "actual_md5": ok["actual_md5"],
+        "verified": (ok["actual_md5"] == expected_md5) if expected_md5 else True,
+        "bytes_downloaded": ok["bytes_downloaded"],
+        "duration_s": round(time.time() - start, 3),
+        "attempts": attempts["n"],
+        "error": "",
     }
 
 
-def _resolve_filename(response: requests.Response, expected: str | None, file_id: str) -> str:
+def _check_existing(file_id, expected_md5, expected_name, output_dir, skip_existing):
+    """Gotowy wynik, jeśli plik jest już lokalnie z poprawnym MD5 (skip_existing)."""
+    if not (expected_name and skip_existing and expected_md5):
+        return None
+    candidate = output_dir / expected_name
+    if candidate.exists() and _compute_md5(candidate) == expected_md5:
+        return {
+            "file_id": file_id,
+            "file_name": expected_name,
+            "local_path": str(candidate),
+            "expected_md5": expected_md5,
+            "actual_md5": expected_md5,
+            "verified": True,
+            "bytes_downloaded": 0,
+            "duration_s": 0.0,
+            "attempts": 0,
+            "error": "",
+        }
+    return None
+
+
+def _format_error(exc: BaseException) -> str:
+    """Czytelny opis błędu do kolumny error w raporcie."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+    if isinstance(exc, _RetryableMD5Error):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _resolve_filename(response: httpx.Response, expected: str | None, file_id: str) -> str:
     """Wyciąga nazwę pliku z Content-Disposition lub używa fallbacku."""
     if expected:
         return expected
