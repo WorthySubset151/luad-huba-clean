@@ -35,6 +35,8 @@ from src.ingest.cases_client import query_cases, parse_cases_response, CasesClie
 
 # Moduł wizualizacji dashboardu (Plotly)
 import app.dashboard_viz as viz
+# Warstwa analityczna (jedno źródło liczb — spójność GUI z terminalem)
+from src.analysis import survival_report as sr
 
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
@@ -715,14 +717,19 @@ def render_dashboard(state: dict) -> None:
         st.error(f"Błąd wczytania zbioru przeżywalności: {exc}")
         return
 
-    # Podstawowe statystyki kohorty (zawsze widoczne)
-    n_samples = ds.height
-    n_events = int(ds["event"].sum()) if "event" in ds.columns else 0
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Próbki", n_samples)
-    c2.metric("Zdarzenia (zgony)", n_events)
-    c3.metric("Geny", len(gene_cols))
+    # Podstawowe statystyki kohorty (jedno źródło: sr.cohort_summary — 1:1 z terminalem)
+    summary = sr.cohort_summary(ds)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Próbki (tumor)", summary["n_samples"])
+    c2.metric("Zdarzenia (zgony)", summary["n_events"])
+    c3.metric("Cenzurowane", f'{summary["n_censored"]} ({summary["censoring_pct"]:.1f}%)')
+    c4.metric("Geny w macierzy", summary["n_genes"])
+    c5.metric("Mediana obserwacji", f'{summary["median_followup_years"]:.2f} lat')
+    stage_str = "  ·  ".join(
+        f'{k}: {summary["stage_counts"][k]}'
+        for k in ("I", "II", "III", "IV", "Unknown") if k in summary["stage_counts"]
+    )
+    st.caption(f"Rozkład stadiów (AJCC): {stage_str}")
 
     tab_surv, tab_expr = st.tabs(["Przeżywalność", "Ekspresja"])
 
