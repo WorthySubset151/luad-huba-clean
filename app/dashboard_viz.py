@@ -503,3 +503,33 @@ def markers_expression(matrix: pl.DataFrame, sample_cols: list) -> go.Figure:
             "Marker", "log2(TPM+1)")
     fig.update_layout(hovermode="closest", showlegend=False)
     return fig
+
+
+# =====================================================================
+#  EKSPRESJA — batch TSS + PCA (dane z src/analysis.expression_summary)
+# =====================================================================
+def tss_batch_figure(tss_rows, top_n: int = 25) -> go.Figure:
+    """Bar: liczba próbek per ośrodek TSS (z expression_summary['tss_rows'])."""
+    rows = tss_rows[:top_n]
+    fig = go.Figure(go.Bar(
+        x=[r["tss"] for r in rows],
+        y=[r["n"] for r in rows],
+        marker_color=PALETTE["primary"],
+        hovertemplate="TSS %{x}: %{y} próbek<extra></extra>",
+    ))
+    _layout(fig, "Batch — ośrodki TSS (liczba próbek)", "Kod ośrodka (TSS)", "Liczba próbek")
+    return fig
+
+
+def pca_variance_figure(pcs) -> go.Figure:
+    """Bar: % wariancji PC1-5 (z expression_summary['pcs'])."""
+    fig = go.Figure(go.Bar(
+        x=[f"PC{p['pc']}" for p in pcs],
+        y=[p["var_pct"] for p in pcs],
+        marker_color=PALETTE["secondary"],
+        text=[f'{p["var_pct"]:.1f}%' for p in pcs],
+        textposition="outside",
+        hovertemplate="%{x}: %{y:.1f}%<extra></extra>",
+    ))
+    _layout(fig, "PCA — wariancja składowych", "Składowa", "% wariancji")
+    return fig

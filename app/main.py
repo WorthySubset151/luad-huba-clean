@@ -37,12 +37,19 @@ from src.ingest.cases_client import query_cases, parse_cases_response, CasesClie
 import app.dashboard_viz as viz
 # Warstwa analityczna (jedno źródło liczb — spójność GUI z terminalem)
 from src.analysis import survival_report as sr
+from src.analysis.expression_report import expression_summary
 
 DATA_RAW = PROJECT_ROOT / "data" / "raw"
 DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 DATA_UPLOADED_STAR = DATA_RAW / "uploaded_star"
 CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yaml"
+
+
+@st.cache_data(show_spinner=False)
+def _expression_summary_cached(path_str: str, mtime: float) -> dict:
+    """Cache podsumowania macierzy (PCA jest kosztowna) — klucz: ścieżka + mtime."""
+    return expression_summary(path_str)
 
 # --- Definicja etapów pipeline'u (kolejność + zależności) ---
 # klucz: id etapu, label: nazwa w sidebarze, requires: id etapu wymaganego wcześniej
@@ -903,6 +910,23 @@ def render_dashboard(state: dict) -> None:
                 sample_cols = []
 
             if sample_cols:
+                # Podsumowanie macierzy (jedno źródło: expression_summary — 1:1 z terminalem)
+                esum = _expression_summary_cached(str(matrix_path), matrix_path.stat().st_mtime)
+                if "error" not in esum:
+                    d = esum["distribution"]
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Geny × próbki", f'{esum["n_genes"]:,} × {esum["n_samples"]}')
+                    m2.metric("Metryka (wykryta)", d["metric"])
+                    m3.metric("Mediana", f'{d["median"]:.2f}')
+                    m4.metric("Wartości zerowe", f'{d["zero_pct"]:.1f}%')
+                    st.caption(
+                        f"IQR: {d['p25']:.2f}–{d['p75']:.2f}  ·  max: {d['max']:,.0f}  ·  "
+                        f"mediana głębokości: {d['median_depth']:,.0f}  ·  "
+                        + ("filtr biotypów zastosowany" if esum["biotype_filtered"]
+                           else "bez filtra biotypów")
+                    )
+                    st.divider()
+
                 st.subheader("Rozkład ekspresji (log2 TPM)")
                 st.caption("Histogram ekspresji jednej próbki — bimodalność (geny off/on) "
                            "to cecha zdrowego RNA-seq.")
@@ -929,6 +953,35 @@ def render_dashboard(state: dict) -> None:
                     st.plotly_chart(fig, use_container_width=True)
                 except Exception as exc:
                     st.error(f"Błąd wykresu markerów: {exc}")
+
+                if "error" not in esum:
+                    st.divider()
+                    st.subheader("Batch — ośrodki TSS")
+                    st.caption(
+                        f"Rozkład próbek per ośrodek (TSS z barkodu TCGA): "
+                        f"{esum['parsed_tss']}/{esum['n_tss']} rozpoznanych. "
+                        "Nierównowaga = potencjalny efekt batch (istotne dla obrony)."
+                    )
+                    try:
+                        st.plotly_chart(viz.tss_batch_figure(esum["tss_rows"]),
+                                        use_container_width=True)
+                    except Exception as exc:
+                        st.error(f"Błąd wykresu TSS: {exc}")
+
+                    st.divider()
+                    st.subheader("PCA — wariancja składowych")
+                    st.caption(
+                        f"Wariancja wyjaśniona przez PC1–5 (PCA na top {esum['pca_top_n']} "
+                        "zmiennych genach, log2 + z-score)."
+                    )
+                    if esum["pcs"]:
+                        try:
+                            st.plotly_chart(viz.pca_variance_figure(esum["pcs"]),
+                                            use_container_width=True)
+                        except Exception as exc:
+                            st.error(f"Błąd wykresu PCA: {exc}")
+                    else:
+                        st.info("PCA nie policzona dla tej macierzy.")
 
 
 def _detect_file_type(content: bytes) -> str:
