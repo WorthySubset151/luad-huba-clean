@@ -205,7 +205,7 @@ treningowego.
 **Zakładka Gotowość ML:**
 
 Ilościowa ocena, czy dane nadają się pod modele ML (docelowo multimodalne), z
-kontrolkami 🟢/🟡/🔴 i zbiorczym werdyktem. Grupy metryk: wymiary i reżim uczenia
+kontrolkami ![OK](https://img.shields.io/badge/OK-7a9b5e) ![uwaga](https://img.shields.io/badge/uwaga-c2a24a) ![działanie](https://img.shields.io/badge/dzia%C5%82anie-bd7a6a) i zbiorczym werdyktem. Grupy metryk: wymiary i reżim uczenia
 (liczba próbek i cech, p/n, zdarzeń na cechę EPV), etykieta (zdarzenia, cenzura,
 kompletność klinicznych per pole: wiek/płeć/stadium), balans klas (nierównowaga
 stadiów), jakość cech (metryka normalizacji, rzadkość, geny o zerowej wariancji),
@@ -672,8 +672,7 @@ co to jest — trzeba nałożyć kolor (stadium/ośrodek); PC1 wg ośrodka = bat
 
 ### Zakładka Gotowość ML — ocena przydatności pod modele
 
-Zakładka liczy zestaw metryk diagnostycznych i przy każdej pokazuje kontrolkę **🟢 OK / 🟡 wymaga uwagi
-/ 🔴 wymaga działania**, plus zbiorczy werdykt i listę zalecanych kroków przygotowania danych. Grupy
+Zakładka liczy zestaw metryk diagnostycznych i przy każdej pokazuje kontrolkę ![OK](https://img.shields.io/badge/OK-7a9b5e) ![wymaga uwagi](https://img.shields.io/badge/wymaga%20uwagi-c2a24a) ![wymaga działania](https://img.shields.io/badge/wymaga%20dzia%C5%82ania-bd7a6a), plus zbiorczy werdykt i listę zalecanych kroków przygotowania danych. Grupy
 metryk: **wymiary i reżim uczenia** (liczba próbek i cech, p/n, zdarzeń na cechę EPV), **etykieta**
 (zdarzenia, cenzura, kompletność klinicznych), **balans klas** (nierównowaga stadiów), **jakość cech**
 (metryka normalizacji, rzadkość, geny o zerowej wariancji), **batch/wyciek** (nierównowaga ośrodków TSS
