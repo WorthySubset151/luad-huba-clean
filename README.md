@@ -20,7 +20,6 @@ analitycznym oraz zestaw notebooków dokumentujących każdy etap przetwarzania.
 - [Instalacja](#instalacja)
 - [Szybki start](#szybki-start)
 - [Interfejs graficzny (GUI)](#interfejs-graficzny-gui)
-- [Interfejs terminalowy (TUI)](#interfejs-terminalowy-tui)
 - [Interfejs CLI](#interfejs-cli)
 - [Omówienie modułów i funkcji](#omówienie-modułów-i-funkcji)
 - [Decyzje metodologiczne](#decyzje-metodologiczne)
@@ -69,12 +68,12 @@ i artefaktów czasowych), **19 962 genów kodujących białka**, 188 zdarzeń
 │   survival_report.py · expression_report.py             │
 │   jedno źródło prawdy: KM, Cox, FDR, ekspresja, PCA      │
 └─────────────────────────────────────────────────────────┘
-                  │                        │
-                  ▼                        ▼
-┌──────────────────────────┐  ┌──────────────────────────┐
-│   GUI (app/, Streamlit)  │  │  TERMINAL (tui/, Textual) │
-│   dashboard + 10 sekcji  │  │  konsola ISPF, 11 opcji   │
-└──────────────────────────┘  └──────────────────────────┘
+                            │
+                            ▼
+        ┌────────────────────────────────────┐
+        │        GUI (app/, Streamlit)       │
+        │   dashboard, panele, eksport ML    │
+        └────────────────────────────────────┘
 ```
 
 Cztery warstwy ETL, każda z jednoznaczną odpowiedzialnością:
@@ -89,11 +88,10 @@ Cztery warstwy ETL, każda z jednoznaczną odpowiedzialnością:
 - **export** — manifest odtwarzalności (hash treści, lista plików źródłowych,
   metryka, znacznik czasowy)
 
-Pipeline ma **trzy interfejsy**: CLI (skrypty i automatyzacja), GUI Streamlit
-(`app/`, dashboard wizualny) oraz terminal Textual (`tui/`, konsola operatorska).
-GUI i terminal liczą analizy z tego samego rdzenia `src/analysis/`
-(survival_report.py, expression_report.py) i wspólnej logiki zarządzania
-`src/manage/` — jedno źródło prawdy, więc oba interfejsy pokazują identyczne
+Pipeline ma **dwa interfejsy**: CLI (skrypty i automatyzacja) oraz GUI Streamlit
+(`app/`, dashboard wizualny z panelami i eksportem zbioru pod ML). GUI liczy
+analizy z rdzenia `src/analysis/` (survival_report.py, expression_report.py) i
+wspólnej logiki zarządzania `src/manage/` — jedno źródło prawdy, spójne
 wyniki. Klient GDC pobiera pliki współbieżnie (httpx.AsyncClient + semafor)
 z ponawianiem błędów przejściowych.
 
@@ -129,9 +127,6 @@ uv run python -m src.cli build-survival --config configs/default.yaml
 
 # 6. Uruchomienie interfejsu graficznego z dashboardem
 uv run streamlit run app/main.py
-
-# ...albo terminalowej konsoli operatorskiej (cały pipeline + analiza w TUI)
-uv run python -m tui
 ```
 
 > **Uwaga o uruchamianiu CLI.** Komendy wywołuje się przez
@@ -177,9 +172,10 @@ serwera ani zewnętrznych narzędzi binarnych).
 
 ### Dashboard analityczny
 
-Dashboard (odblokowany po zbudowaniu zbioru przeżywalności) prezentuje kluczowe
-wizualizacje biologiczne w dwóch pod-zakładkach. Wszystkie wykresy są
-interaktywne (Plotly: najechanie kursorem, przybliżanie).
+Dashboard (odblokowany po zbudowaniu zbioru przeżywalności) ma **trzy pod-zakładki**:
+dwie z interaktywnymi wizualizacjami biologicznymi (Plotly: najechanie kursorem,
+przybliżanie) oraz ilościową ocenę gotowości danych pod ML wraz z eksportem zbioru
+treningowego.
 
 **Zakładka Przeżywalność:**
 
@@ -205,6 +201,24 @@ interaktywne (Plotly: najechanie kursorem, przybliżanie).
   czas obserwacji, status, typ tkanki) — łączy ekspresję z kontekstem klinicznym
 - **Ekspresja markerów LUAD** — rozkład klasycznych markerów raka płuca po
   wszystkich próbkach (wykres pudełkowy)
+
+**Zakładka Gotowość ML:**
+
+Ilościowa ocena, czy dane nadają się pod modele ML (docelowo multimodalne), z
+kontrolkami 🟢/🟡/🔴 i zbiorczym werdyktem. Grupy metryk: wymiary i reżim uczenia
+(liczba próbek i cech, p/n, zdarzeń na cechę EPV), etykieta (zdarzenia, cenzura,
+kompletność klinicznych per pole: wiek/płeć/stadium), balans klas (nierównowaga
+stadiów), jakość cech (metryka normalizacji, rzadkość, geny o zerowej wariancji),
+batch/wyciek (nierównowaga ośrodków TSS oraz test „PC1 — biologia czy batch?" jako
+η²(PC1~stadium) vs η²(PC1~ośrodek)) i integralność (duplikaty próbek na pacjenta).
+
+Zakładka zawiera też **Eksport zbioru gotowego pod ML** — z audytu robi remediację:
+deduplikacja do 1 próbki/pacjenta, podział train/test grupowany po pacjencie
+(`case_id`) ze stratyfikacją po zdarzeniu, selekcja cech (top-K wg wariancji) i
+standaryzacja fitowane **wyłącznie na train** (bez wycieku do testu), log2(x+1) i
+odrzucenie genów o zerowej wariancji. Wynik (`X_train`/`X_test`, `y_train`/`y_test`,
+lista wybranych genów, `manifest.json` z pełną dokumentacją kroków i rekomendowanymi
+ustawieniami modelu) pobiera się z GUI jako archiwum ZIP.
 
 ### Zarządzanie danymi
 
@@ -272,50 +286,6 @@ uv run python -m src.cli build-survival --config my_experiment.yaml
 uv run python -m src.cli validate-cohort --strict
 ```
 
-## Interfejs terminalowy (TUI)
-
-Terminal (`tui/`, oparty na [Textual](https://textual.textualize.io/)) to
-**konsola operatorska** w stylu ISPF — pełnoekranowy interfejs tekstowy, który
-udostępnia cały pipeline i analizę w jednym miejscu, z menu numerowanym według
-przepływu procesu. Uruchomienie:
-
-```bash
-uv run python -m tui
-```
-
-Nawigacja: wpisz numer opcji w polu `Opcja ===>` (albo wybierz z listy) i Enter.
-W każdym ekranie działają klawisze funkcyjne (PF); `PF3`/`Esc` wraca do menu.
-
-### Menu (w kolejności procesu)
-
-| # | Opcja | Co robi |
-|---|-------|---------|
-| **1** | DOWNLOAD | Pobieranie z GDC API (metadane + pliki STAR + clinical) |
-| **2** | INGEST | Parsowanie STAR-Counts po ścieżce do `data/interim` |
-| **3** | MATRIX | Budowa macierzy ekspresji (interim → `expression_matrix`) |
-| **4** | DATASET | Budowa zbioru przeżywalności (macierz + clinical → parquet) |
-| **5** | PIPELINE | Status etapów ETL (zbiory danych, kompletność) |
-| **6** | VALIDATE | Walidacja kohorty (QC — spójność próbek/klinika) |
-| **7** | STATUS | Przegląd kohorty (próbki, zdarzenia, geny, stadia) |
-| **8** | EXPRESSION | Macierz ekspresji (rozkład, batch TSS, PCA) |
-| **9** | SURVIVAL | Analiza przeżywalności (KM + Cox + rygor statystyczny) |
-| **10** | CONFIG | Konfiguracja pipeline'u (podgląd `configs/default.yaml`) |
-| **11** | ZARZĄDZANIE | Archiwizacja ZIP + bezpieczne kasowanie (potwierdzenie `USUŃ`) |
-
-Opcje **1–4** to ETL w kolejności wykonania (pobierz → parsuj → macierz → zbiór),
-**5–6** to kontrola (co zbudowane, QC), **7–9** to analiza, **10–11** to
-administracja. Ekrany operacyjne (1–4, 11) wykonują zadania w **wątku tła**
-z paskiem postępu (interfejs pozostaje responsywny); ekrany analityczne (5–9)
-czytają gotowe dane i renderują raporty.
-
-### Parytet z GUI
-
-Terminal i GUI liczą wszystko z tego samego rdzenia (`src/analysis/`,
-`src/manage/`), więc dają **identyczne wyniki** — STATUS, SURVIVAL (z rygorem
-statystycznym), EXPRESSION, walidacja QC i operacje na danych są spójne między
-interfejsami. Terminal nie wymaga przeglądarki ani serwera — nadaje się do pracy
-przez SSH i do obsługi z klawiatury.
-
 ## Omówienie modułów i funkcji
 
 ### `src/ingest/` — parsery i klient GDC
@@ -345,7 +315,7 @@ z **ponawianiem** błędów przejściowych (tenacity, exponential backoff — ti
 sum MD5. Zapytania są **parametryzowane projektem** (`project_id`, domyślnie
 TCGA-LUAD) — ten sam kod pobiera dowolny projekt TCGA (BRCA, GBM, …). Sygnatura
 `download_files` pozostaje synchroniczna (z guardem na działającą pętlę zdarzeń),
-więc GUI i terminal korzystają ze współbieżności bez żadnych zmian po swojej
+więc GUI korzysta ze współbieżności bez żadnych zmian po swojej
 stronie.
 
 **`file_naming.py`** — obsługa dwóch konwencji nazewniczych plików STAR
@@ -397,11 +367,10 @@ to jedna próbka; kolumny: identyfikatory, dane przeżycia (`time` w dniach,
   [Decyzje metodologiczne](#decyzje-metodologiczne))
 - `drop_zero_time` — usuwa próbki z `time ≤ 0` (artefakt PHI)
 
-### `src/analysis/` — wspólny rdzeń analizy (jedno źródło dla GUI i terminala)
+### `src/analysis/` — wspólny rdzeń analizy (jedno źródło dla GUI)
 
 **`survival_report.py`** — bezgłowy rdzeń analizy przeżywalności zwracający czyste
-struktury danych (dict), z których GUI (Plotly) i terminal (Rich) renderują
-identyczne wyniki. Funkcje: `cohort_summary`, `km_report`/`km_summary`,
+struktury danych (dict), z których GUI (Plotly) renderuje wyniki. Funkcje: `cohort_summary`, `km_report`/`km_summary`,
 `cox_clinical_report`, `cox_genes_report`, `signature_km_report`,
 `single_gene_km_report`, `multi_gene_km_report`. **Rygor statystyczny:** `ALPHA`
 (0,05), `benjamini_hochberg`/`multiple_testing_report` (korekcja FDR),
@@ -414,14 +383,29 @@ Schoenfelda), `statistical_rigor_report` (raport zbiorczy). Stałe: `SIGNATURE_P
 autodetekcja metryki (TPM vs counts), rozkład ekspresji, efekt batch TSS, PCA
 (wariancja głównych składowych), markery LUAD.
 
-### `src/manage/` — zarządzanie danymi (jedno źródło dla GUI i terminala)
+**`readiness_report.py`** — `ml_readiness_report(ds, esum)`: metryki gotowości pod
+ML pogrupowane w kategorie (wymiary/reżim, etykieta, balans klas, jakość cech,
+batch/wyciek, integralność), każda ze statusem green/yellow/red, plus zbiorczy
+werdykt i lista zalecanych kroków. Liczy m.in. p/n, EPV, kompletność etykiet per
+pole, nierównowagę stadiów, geny o zerowej wariancji, nierównowagę ośrodków TSS oraz
+test PC1 (biologia vs batch) metodą η² (correlation ratio).
+
+**`ml_export.py`** — remediacja i eksport zbioru pod ML. `prepare_ml_dataset(ds, …)`:
+deduplikacja do 1 próbki/pacjenta (deepest), podział train/test **grupowany po
+pacjencie** ze stratyfikacją po zdarzeniu, selekcja cech (top-K wg wariancji) i
+standaryzacja **fitowane wyłącznie na train** (dyscyplina braku wycieku), log2(x+1),
+odrzucenie zerowej wariancji. Zwraca `X_train`/`X_test`, `y_train`/`y_test`, listę
+genów i manifest; `build_ml_bundle(result)` pakuje całość (z `manifest.json` i README)
+w archiwum ZIP.
+
+### `src/manage/` — zarządzanie danymi
 
 **`data_ops.py`** — wspólna logika archiwizacji i bezpiecznego kasowania zakresów
 danych. Definicje zakresów `MANAGE_SCOPES` (STAR, metadane, parquety pośrednie,
 wyniki finalne), twardy guard `is_within_data` (operacje wyłącznie wewnątrz
 `data/`, neutralizuje też `..`), tryby shallow/recursive, `scope_stats`,
 `delete_scope`, `build_archive_zip` (do pamięci — dla pobrania w GUI) oraz
-`build_archive_to_path` (strumieniowo na dysk — dla terminala, bezpieczne dla
+`build_archive_to_path` (strumieniowo na dysk — bezpieczne dla
 gigabajtów surowych STAR).
 
 ### `src/cli_config.py` — konfiguracja
@@ -445,7 +429,7 @@ kliniczny wybranej próbki).
 Funkcje KM **delegują obliczenia** do `src/analysis/survival_report.py` (jedno
 źródło prawdy) i tylko rysują wynik (`km_single_gene`, `km_multi_gene`,
 `tss_batch_figure`, `pca_variance_figure` i in.) — dzięki temu wykresy w GUI
-i raporty w terminalu pochodzą z tych samych liczb.
+pochodzą z tych samych liczb.
 
 ## Decyzje metodologiczne
 
@@ -491,6 +475,22 @@ liczbie **zdarzeń** i zadanej mocy. Dla analizy przeżycia liczą się zdarzeni
 nie liczba pacjentów (n jest dane — cała kohorta TCGA), więc prospektywna analiza
 mocy byłaby bezprzedmiotowa. Na kohorcie referencyjnej (147 zdarzeń) minimalny
 wykrywalny HR to ≈ 1,59 przy mocy 80% i ≈ 1,71 przy 90%.
+
+**Model Coxa — zbieżność.** Cox liczony jest domyślnie bez penalizera (artefakty
+kolinearności widoczne świadomie), ale gdy Newton-Raphson nie zbiega (silna
+kolinearność skorelowanych genów, macierz osobliwa), automatycznie włącza się ridge
+penalizer (L2), zwiększany aż do stabilnego dopasowania — panel liczy wynik zamiast
+się wywalać. Kolumny o zerowej wariancji są odrzucane przed dopasowaniem.
+
+**Przygotowanie danych pod ML — dyscyplina braku wycieku.** Warstwa eksportu
+(zakładka Gotowość ML) świadomie rozdziela to, co wolno wpiec w dane, od tego, co
+należy do modelu. W danych: deduplikacja do jednej próbki na pacjenta, podział
+train/test **grupowany po pacjencie** (`case_id`, nie po próbce — inaczej ten sam
+pacjent trafiłby do train i test), stratyfikacja po zdarzeniu, a selekcja cech
+(top-K wg wariancji, nienadzorowana) i standaryzacja **fitowane wyłącznie na train**.
+W manifeście (nie w danych): regularyzacja przy p≫n/EPV, wagi klas przy nierównowadze
+stadiów, korekta batchu (ComBat / TSS jako kowarianta) i GroupKFold do walidacji — to
+decyzje modelowe, których wpiekanie w zbiór dałoby przeciek albo utratę informacji.
 
 ## Konfiguracja
 
@@ -543,7 +543,7 @@ luad-huba-clean/
 │   ├── ingest/       # parsery + współbieżny klient GDC API
 │   ├── validate/     # QC kohorty
 │   ├── transform/    # macierz, survival dataset
-│   ├── analysis/     # wspólny rdzeń: survival_report, expression_report
+│   ├── analysis/     # rdzeń: survival, expression, readiness (Gotowość ML), ml_export
 │   ├── manage/       # archiwizacja + bezpieczne kasowanie (data_ops)
 │   ├── export/       # manifest odtwarzalności
 │   ├── cli.py        # komendy CLI (Typer)
@@ -551,9 +551,6 @@ luad-huba-clean/
 ├── app/
 │   ├── main.py       # interfejs Streamlit (10 sekcji)
 │   └── dashboard_viz.py  # wizualizacje Plotly (delegują do src/analysis)
-├── tui/
-│   ├── app.py        # konsola operatorska Textual (11 opcji, ISPF)
-│   └── render.py     # renderowanie Rich (raporty terminala)
 ├── notebooks/        # 7 notebooków - sanity checks, EDA, survival
 ├── configs/          # YAML (default, filters)
 ├── logs/qc/          # raporty walidacji
@@ -580,10 +577,10 @@ luad-huba-clean/
   open-access TCGA)
 
 Kluczowe zależności: `polars` (przetwarzanie danych), `typer` (CLI),
-`streamlit` (GUI), `textual` + `rich` (terminal), `httpx` + `tenacity`
+`streamlit` (GUI), `httpx` + `tenacity`
 (współbieżny klient GDC z ponawianiem), `plotly` (wizualizacje), `lifelines`
 i `scikit-survival` (analiza przeżywalności), `scipy` (statystyka: FDR,
-Schoenfeld), `pyarrow` (parquet).
+Schoenfeld), `pandas` + `pyarrow` (parquet, eksport CSV/ZIP).
 
 
 ## Przewodnik po dashboardzie analitycznym

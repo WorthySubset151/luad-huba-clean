@@ -807,5 +807,91 @@ def _write_metadata_cart(response: dict, output_path: Path) -> None:
         json_lib.dump(hits, fh, indent=2, ensure_ascii=False)
 
 
+@app.command("repair-clinical")
+def repair_clinical(
+    dataset_path: Path = typer.Option(
+        _default_processed_dir() / "survival_dataset.parquet",
+        "--dataset",
+        help="Zbiór przeżywalności do naprawy.",
+    ),
+    clinical_path: Optional[Path] = typer.Option(
+        None,
+        "--clinical",
+        help="Ścieżka do clinical.tsv ze świeżą kliniką. Domyślnie wyszukiwana w data/raw/.",
+    ),
+    output_path: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        help="Plik wyjściowy. Domyślnie *_fixed.parquet obok wejścia.",
+    ),
+) -> None:
+    """Dograją poprawne wiek/płeć/stadium z clinical.tsv do istniejącego zbioru
+    przeżywalności (join po case_id). Bez przebudowy macierzy — etykiety przeżycia,
+    próbki i geny pozostają nietknięte; odświeżane są tylko kowarianty kliniczne."""
+    covariates = ["age_at_index", "gender", "ajcc_pathologic_stage"]
+
+    if not dataset_path.exists():
+        typer.secho(f"Nie znaleziono zbioru: {dataset_path}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    if clinical_path is None:
+        candidates = sorted(_default_raw_dir().glob("clinical*.tsv"))
+        if not candidates:
+            typer.secho(
+                f"Nie znaleziono pliku clinical*.tsv w {_default_raw_dir()}",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(code=1)
+        clinical_path = candidates[0]
+
+    if output_path is None:
+        output_path = dataset_path.with_name(dataset_path.stem + "_fixed.parquet")
+
+    dataset = pl.read_parquet(dataset_path)
+    if "case_id" not in dataset.columns:
+        typer.secho(
+            "Zbiór nie ma kolumny case_id — nie da się dograć kliniki po pacjencie.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(code=1)
+
+    def _completeness(df: pl.DataFrame) -> str:
+        return " · ".join(
+            f"{c} {100 * int(df[c].is_not_null().sum()) / df.height:.1f}%"
+            for c in covariates
+            if c in df.columns
+        )
+
+    typer.echo(f"Wejście: {dataset_path} ({dataset.height} próbek)")
+    typer.echo(f"  kompletność PRZED: {_completeness(dataset)}")
+
+    typer.echo(f"Wczytuję dane kliniczne: {clinical_path}")
+    try:
+        clinical = parse_clinical(clinical_path)
+    except (ClinicalParserError, FileNotFoundError) as exc:
+        typer.secho(f"Błąd wczytania kliniki: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    keep = ["case_submitter_id"] + [c for c in covariates if c in clinical.columns]
+    clinical = clinical.select(keep)
+
+    order = dataset.columns
+    dataset = dataset.drop([c for c in covariates if c in dataset.columns])
+    dataset = dataset.join(
+        clinical, left_on="case_id", right_on="case_submitter_id", how="left"
+    )
+    dataset = dataset.select([c for c in order if c in dataset.columns])
+
+    matched = int(dataset["case_id"].is_in(clinical["case_submitter_id"].to_list()).sum())
+    typer.echo(
+        f"  dopasowano do clinical: {matched}/{dataset.height} "
+        f"({100 * matched / dataset.height:.1f}%)"
+    )
+    typer.echo(f"  kompletność PO:    {_completeness(dataset)}")
+
+    dataset.write_parquet(output_path)
+    typer.secho(f"Zapisano naprawiony zbiór: {output_path}", fg=typer.colors.GREEN)
+
+
 if __name__ == "__main__":
     app()
