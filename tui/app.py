@@ -29,6 +29,7 @@ from textual.screen import Screen  # noqa: E402
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static  # noqa: E402
 
 from src.analysis import survival_report as sr  # noqa: E402
+from src.pipeline_status import pipeline_status  # noqa: E402
 from tui import render  # noqa: E402
 
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
@@ -39,6 +40,7 @@ VERSION = "v0.1"
 MENU = [
     ("0", "STATUS", "Przegląd kohorty (próbki, zdarzenia, geny, stadia)", "status"),
     ("1", "SURVIVAL", "Analiza przeżywalności (Kaplan-Meier + Cox HR)", "survival"),
+    ("2", "PIPELINE", "Status etapów ETL (zbiory danych, kompletność)", "pipeline"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -130,6 +132,18 @@ class SurvivalScreen(ReportScreen):
         return render.survival_report(km, cox_clin, cox_genes)
 
 
+class PipelineScreen(ReportScreen):
+    """Status etapów ETL — inspekcja dysku, działa też gdy artefaktów brak."""
+
+    PANEL_ID = "LUADHUB.PIPE"
+    TITLE_TXT = "PIPELINE — STATUS ETL"
+
+    def action_refresh(self) -> None:
+        # Nie wymaga survival_dataset — sensem panelu jest pokazać, czego brak.
+        content = self.query_one("#content", Static)
+        content.update(render.pipeline_report(pipeline_status(PROJECT_ROOT)))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -174,6 +188,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(StatusScreen())
         elif action == "survival":
             self.app.push_screen(SurvivalScreen())
+        elif action == "pipeline":
+            self.app.push_screen(PipelineScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")

@@ -164,3 +164,64 @@ def survival_report(km: dict, cox_clinical: dict, cox_genes: dict) -> Group:
         Text(""), sep, Text(""),
         _cox_genes_block(cox_genes),
     )
+
+
+# ---------------------------------------------------------------------------
+#  PIPELINE — status etapów ETL (lista zbiorów w stylu z/OS)
+# ---------------------------------------------------------------------------
+def _fmt_size(n) -> str:
+    if n is None:
+        return "—"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def pipeline_report(status: dict) -> Group:
+    done, total = status["stages_done"], status["stages_total"]
+    head = Text.assemble(
+        ("STATUS PIPELINE'U ETL — TCGA-LUAD", HEAD),
+        (f"      etapy gotowe: {done}/{total}", DIM),
+    )
+
+    stages = Table(box=_BOX, border_style=DIM, title="ETAPY", title_style=HEAD)
+    stages.add_column("Status", justify="left")
+    stages.add_column("Etap", style=DIM)
+    stages.add_column("Szczegóły", style=DIM)
+    for s in status["stages"]:
+        if s["status"] == "ok":
+            badge = Text("✓ GOTOWY", style=f"bold {GREEN}")
+        elif s["status"] == "missing":
+            badge = Text("✗ BRAK", style=f"bold {RISK}")
+        else:
+            badge = Text(f"⊘ czeka: {s['blocked_by']}", style=DIM)
+        stages.add_row(badge, s["label"], s["detail"])
+
+    datasets = Table(box=_BOX, border_style=DIM, title="ZBIORY DANYCH", title_style=HEAD)
+    datasets.add_column("Nazwa zbioru", style=DIM)
+    datasets.add_column("", justify="center")
+    datasets.add_column("Rekordy", justify="right", style=GREEN)
+    datasets.add_column("Rozmiar", justify="right", style=GREEN)
+    datasets.add_column("Zmodyfikowano", justify="right", style=GREEN)
+    for a in status["artifacts"]:
+        present = Text("✓", style=GREEN) if a["exists"] else Text("✗", style=RISK)
+        if a.get("note") == "nieczytelny parquet":
+            rec = Text("nieczytelny", style=RISK)
+        elif a.get("rows"):
+            rec = f'{a["rows"]:,}×{a["cols"]}'
+        elif "count" in a:
+            rec = f'{a["count"]} plik.' if a["exists"] else "—"
+        elif a["exists"]:
+            rec = "plik"
+        else:
+            rec = "—"
+        datasets.add_row(a["name"], present, rec, _fmt_size(a["size"]), a["mtime"] or "—")
+
+    root_line = Text(
+        f'  root: {status["root"]}     config: ' + ("✓" if status["config_exists"] else "✗"),
+        style=DIM,
+    )
+    return Group(head, Text(""), stages, Text(""), datasets, Text(""), root_line)
