@@ -9,9 +9,6 @@ __author__ = "Łukasz Połaski"
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
-from lifelines import KaplanMeierFitter
-from lifelines.statistics import logrank_test
-
 # Rdzeń analityczny (jedno źródło prawdy metodologii Cox/KM oraz danych panelu).
 from src.analysis import survival_report as sr
 from src.analysis.survival_report import SIGNATURE_PANEL, find_gene_col
@@ -78,23 +75,6 @@ CLINICAL_LABELS = {
 }
 
 
-def _ensure_time_years(pdf):
-    """Zapewnia kolumnę time_years (survival_dataset ma 'time' w dniach)."""
-    pdf = pdf.copy()
-    if "time_years" not in pdf.columns:
-        if "time" in pdf.columns:
-            pdf["time_years"] = pdf["time"] / 365.25
-        else:
-            raise KeyError("Brak kolumny 'time' ani 'time_years' w danych przeżywalności")
-    return pdf
-
-
-# collapse_stage i find_gene_col importowane z src/analysis (jedno źródło prawdy).
-
-
-# (find_gene_col powyżej — importowany z src/analysis)
-
-
 def _layout(fig: go.Figure, title: str, xlabel: str, ylabel: str) -> go.Figure:
     """Wspólny styl layoutu wykresów."""
     fig.update_layout(
@@ -114,36 +94,6 @@ def _layout(fig: go.Figure, title: str, xlabel: str, ylabel: str) -> go.Figure:
     return fig
 
 
-def _km_trace(pdf, mask, label, color, dash=None):
-    """Buduje ślad KM (schodkowa krzywa przeżycia + CI) dla podgrupy."""
-    kmf = KaplanMeierFitter()
-    kmf.fit(pdf["time_years"][mask], pdf["event"][mask], label=label)
-    sf = kmf.survival_function_
-    ci = kmf.confidence_interval_
-    times = sf.index.values
-    surv = sf.iloc[:, 0].values
-    lower = ci.iloc[:, 0].values
-    upper = ci.iloc[:, 1].values
-
-    n = int(mask.sum())
-    traces = []
-    # Pasmo CI
-    traces.append(go.Scatter(
-        x=np.concatenate([times, times[::-1]]),
-        y=np.concatenate([upper, lower[::-1]]),
-        fill="toself", fillcolor=color.replace(")", ",0.12)").replace("rgb", "rgba")
-            if color.startswith("rgb") else _hex_to_rgba(color, 0.12),
-        line=dict(width=0), hoverinfo="skip", showlegend=False,
-    ))
-    # Krzywa schodkowa
-    traces.append(go.Scatter(
-        x=times, y=surv, mode="lines", name=f"{label} (n={n})",
-        line=dict(color=color, width=2.5, shape="hv", dash=dash),
-        hovertemplate="%{y:.2f}<extra></extra>",
-    ))
-    return traces, kmf
-
-
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
@@ -153,9 +103,9 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 def _km_curve_trace(curve, label, color, n=None, dash=None):
     """Ślady KM (CI + krzywa schodkowa) z gotowych tablic z sr.km_report.
 
-    Odpowiednik _km_trace, ale bez dopasowywania KM — punkty przychodzą z
-    jednego źródła (src/analysis), więc krzywa w GUI i liczby w terminalu nie
-    mogą się rozjechać. _km_trace zostaje dla paneli gen-owych (tylko GUI).
+    Wszystkie panele KM (overall, per-stadium, sygnatura, pojedynczy/multi-gen)
+    liczy src/analysis i zwraca gotowe punkty krzywych — GUI tu tylko rysuje,
+    więc krzywa w GUI i liczby w terminalu nie mogą się rozjechać.
     """
     times = np.asarray(curve["timeline"], dtype=float)
     surv = np.asarray(curve["surv"], dtype=float)
@@ -241,100 +191,53 @@ def km_signature(ds) -> tuple[go.Figure, dict]:
     return fig, {"p_value": rep["logrank_p"], "n_genes": rep["n_genes"]}
 
 
-def km_single_gene(ds, pdf, gene_symbol: str, ensg: str) -> tuple[go.Figure, dict]:
-    """KM dla pojedynczego genu (high/low względem mediany ekspresji)."""
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
-    col = find_gene_col(ensg, gene_cols)
-    if col is None:
-        return None, {"error": f"Gen {gene_symbol} ({ensg}) nie znaleziony w macierzy"}
-
-    expr = ds[col].to_numpy().astype(float)
-    pdf = _ensure_time_years(pdf)
-    pdf["expr"] = expr
-    median = np.median(expr)
-    pdf["expr_group"] = np.where(expr >= median, "high", "low")
+def km_single_gene(ds, gene_symbol: str, ensg: str) -> tuple[go.Figure, dict]:
+    """KM pojedynczego genu. Liczby i krzywe z sr.single_gene_km_report."""
+    rep = sr.single_gene_km_report(ds, ensg, gene_symbol)
+    if "error" in rep:
+        return None, rep
 
     fig = go.Figure()
-    high_mask = (pdf["expr_group"] == "high").values
-    low_mask = (pdf["expr_group"] == "low").values
-
-    traces_high, _ = _km_trace(pdf, high_mask, f"{gene_symbol} high", PALETTE["primary"])
-    traces_low, _ = _km_trace(pdf, low_mask, f"{gene_symbol} low", PALETTE["secondary"])
-    for t in traces_high + traces_low:
+    for t in _km_curve_trace(rep["high"]["curve"], rep["high"]["label"],
+                             PALETTE["primary"], n=rep["high"]["n"]):
         fig.add_trace(t)
-
-    p_value = None
-    try:
-        res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
-                           pdf["event"][high_mask], pdf["event"][low_mask])
-        p_value = float(res.p_value)
-    except Exception:
-        pass
+    for t in _km_curve_trace(rep["low"]["curve"], rep["low"]["label"],
+                             PALETTE["secondary"], n=rep["low"]["n"]):
+        fig.add_trace(t)
 
     _layout(fig, f"Kaplan-Meier — {gene_symbol} high vs low (podział: mediana)",
             "Czas (lata)", "Prawdopodobieństwo przeżycia")
     fig.update_yaxes(range=[0, 1.02])
-    return fig, {"p_value": p_value, "median_expr": float(median)}
+    return fig, {"p_value": rep["logrank_p"], "median_expr": rep["median_expr"]}
 
 
-def km_multi_gene(ds, pdf, genes: list[tuple[str, str]]) -> tuple[go.Figure, list]:
-    """Porównuje wiele genów na jednym wykresie KM.
-
-    Dla każdego genu rysuje krzywą grupy "high" (ekspresja >= mediana),
-    pozwalając wizualnie porównać prognostyczny efekt różnych genów.
-    Zwraca też tabelę log-rank (high vs low) per gen.
+def km_multi_gene(ds, genes: list[tuple[str, str]]) -> tuple[go.Figure, list]:
+    """Porównanie wielu genów (krzywe grup „high”). Liczby z sr.multi_gene_km_report.
 
     Argumenty:
         genes: lista par (symbol, ensg) genów do porównania.
     """
-    pdf = _ensure_time_years(pdf)
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
-
-    # Paleta dla wielu genów (cyklicznie)
+    sr_results = sr.multi_gene_km_report(ds, genes)
     multi_colors = [
         PALETTE["primary"], PALETTE["secondary"], "#a8a030",
         "#3c6a8b", "#8b3c6a", "#6a8b3c", "#c4844a",
     ]
-
     fig = go.Figure()
     results = []
     color_idx = 0
-
-    for symbol, ensg in genes:
-        col = find_gene_col(ensg, gene_cols)
-        if col is None:
-            results.append({"gene": symbol, "p_value": None, "note": "brak w macierzy"})
-            continue
-
-        expr = ds[col].to_numpy().astype(float)
-        median = np.median(expr)
-        high_mask = (expr >= median)
-        low_mask = (expr < median)
-
-        color = multi_colors[color_idx % len(multi_colors)]
-        color_idx += 1
-
-        # Rysujemy tylko krzywą "high" (porównanie efektu między genami)
-        kmf = KaplanMeierFitter()
-        kmf.fit(pdf["time_years"][high_mask], pdf["event"][high_mask], label=f"{symbol} high")
-        sf = kmf.survival_function_
-        n_high = int(high_mask.sum())
-        fig.add_trace(go.Scatter(
-            x=sf.index.values, y=sf.iloc[:, 0].values, mode="lines",
-            name=f"{symbol} high (n={n_high})",
-            line=dict(color=color, width=2.5, shape="hv"),
-            hovertemplate=f"{symbol}: %{{y:.2f}}<extra></extra>",
-        ))
-
-        # Log-rank high vs low dla tego genu
-        p_value = None
-        try:
-            res = logrank_test(pdf["time_years"][high_mask], pdf["time_years"][low_mask],
-                               pdf["event"][high_mask], pdf["event"][low_mask])
-            p_value = float(res.p_value)
-        except Exception:
-            pass
-        results.append({"gene": symbol, "p_value": p_value, "note": ""})
+    for r in sr_results:
+        if r["high_curve"] is not None:
+            color = multi_colors[color_idx % len(multi_colors)]
+            color_idx += 1
+            curve = r["high_curve"]
+            fig.add_trace(go.Scatter(
+                x=np.asarray(curve["timeline"], dtype=float),
+                y=np.asarray(curve["surv"], dtype=float), mode="lines",
+                name=f'{r["symbol"]} high (n={r["n_high"]})',
+                line=dict(color=color, width=2.5, shape="hv"),
+                hovertemplate=f'{r["symbol"]}: %{{y:.2f}}<extra></extra>',
+            ))
+        results.append({"gene": r["symbol"], "p_value": r["p_value"], "note": r["note"]})
 
     _layout(fig, "Kaplan-Meier — porównanie genów (krzywe grup „high”)",
             "Czas (lata)", "Prawdopodobieństwo przeżycia")

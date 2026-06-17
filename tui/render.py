@@ -179,7 +179,49 @@ def _signature_block(rep: dict) -> Group:
     return Group(head, t, p_line)
 
 
-def survival_report(km: dict, cox_clinical: dict, signature: dict, cox_genes: dict) -> Group:
+def _single_gene_block(rep: dict) -> Group:
+    symbol = rep.get("symbol", "?")
+    head = Text(f"Kaplan-Meier — pojedynczy gen ({symbol})", style=HEAD)
+    if "error" in rep:
+        return Group(head, Text("  " + rep["error"], style=RISK))
+    t = Table(box=_BOX, border_style=DIM)
+    t.add_column("Grupa", style=DIM)
+    t.add_column("n", justify="right", style=GREEN)
+    t.add_column("Mediana OS [lat]", justify="right", style=GREEN)
+    for key, color in (("high", RISK), ("low", GREEN)):
+        g = rep[key]
+        med = f'{g["median_os"]:.2f}' if g["median_os"] is not None else "—"
+        t.add_row(Text(g["label"], style=color), str(g["n"]), med)
+    p = rep["logrank_p"]
+    sig = p is not None and p < 0.05
+    info = Text.assemble(
+        ("  Log-rank (high vs low): p = ", DIM), (_fmt_p(p), GREEN if sig else RISK),
+        (f'   mediana ekspresji: {rep["median_expr"]:.2f}', DIM),
+    )
+    return Group(head, t, info)
+
+
+def _multi_gene_block(results: list) -> Group:
+    head = Text("Kaplan-Meier — porównanie wielu genów", style=HEAD)
+    if not results:
+        return Group(head, Text("  Brak genów do porównania.", style=DIM))
+    t = Table(box=_BOX, border_style=DIM)
+    t.add_column("Gen", style=DIM)
+    t.add_column("Log-rank p (high vs low)", justify="right", style=GREEN)
+    t.add_column("Ocena", style=DIM)
+    for r in results:
+        p = r["p_value"]
+        if p is None:
+            t.add_row(r["symbol"], "—", Text(r.get("note", ""), style=RISK))
+        else:
+            sig = p < 0.05
+            t.add_row(r["symbol"], Text(_fmt_p(p), style=GREEN if sig else DIM),
+                      "istotne" if sig else "nieistotne")
+    return Group(head, t)
+
+
+def survival_report(km: dict, cox_clinical: dict, signature: dict,
+                    single_gene: dict, multi_gene: list, cox_genes: dict) -> Group:
     sep = Text("─" * 66, style=DIM)
     return Group(
         _km_block(km),
@@ -187,6 +229,10 @@ def survival_report(km: dict, cox_clinical: dict, signature: dict, cox_genes: di
         _cox_clinical_block(cox_clinical),
         Text(""), sep, Text(""),
         _signature_block(signature),
+        Text(""), sep, Text(""),
+        _single_gene_block(single_gene),
+        Text(""), sep, Text(""),
+        _multi_gene_block(multi_gene),
         Text(""), sep, Text(""),
         _cox_genes_block(cox_genes),
     )
@@ -315,4 +361,4 @@ def expression_report(s: dict) -> Group:
         else:
             mk.add_row(m["symbol"], Text("brak w macierzy", style=RISK), "—")
 
-    return Group(head, sub, Text(""), dist, Text(""), tss, Text(""), pca, Text(""), mk)
+    return Group(head, sub, Text(""), dist, Text(""), mk, Text(""), tss, Text(""), pca)

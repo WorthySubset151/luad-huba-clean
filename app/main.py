@@ -817,7 +817,7 @@ def render_dashboard(state: dict) -> None:
             ensg = viz.LUAD_MARKERS.get(selected_gene) or viz.SIGNATURE_PANEL.get(selected_gene, (None,))[0]
             if ensg:
                 try:
-                    fig, info = viz.km_single_gene(ds, pdf, selected_gene, ensg)
+                    fig, info = viz.km_single_gene(ds, selected_gene, ensg)
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
                         if info.get("p_value") is not None:
@@ -847,7 +847,7 @@ def render_dashboard(state: dict) -> None:
                 if ensg:
                     genes_pairs.append((g, ensg))
             try:
-                fig, results = viz.km_multi_gene(ds, pdf, genes_pairs)
+                fig, results = viz.km_multi_gene(ds, genes_pairs)
                 st.plotly_chart(fig, use_container_width=True)
                 # Tabela log-rank per gen
                 rows = []

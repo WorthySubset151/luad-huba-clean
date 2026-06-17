@@ -29,7 +29,7 @@ from textual.screen import Screen  # noqa: E402
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static  # noqa: E402
 
 from src.analysis import survival_report as sr  # noqa: E402
-from src.analysis.expression_report import expression_summary  # noqa: E402
+from src.analysis.expression_report import expression_summary, LUAD_MARKERS  # noqa: E402
 from src.pipeline_status import pipeline_status  # noqa: E402
 from tui import render  # noqa: E402
 
@@ -128,12 +128,23 @@ class SurvivalScreen(ReportScreen):
     PANEL_ID = "LUADHUB.SURV"
     TITLE_TXT = "SURVIVAL — KAPLAN-MEIER + COX"
 
+    # Katalog genów i widoki domyślne — zgodne z GUI (Dashboard analityczny)
+    GENE_CATALOG = {**LUAD_MARKERS,
+                    **{sym: ensg for sym, (ensg, _s) in sr.SIGNATURE_PANEL.items()}}
+    DEFAULT_SINGLE_GENE = "ALK"                      # index 0 posortowanego katalogu (GUI)
+    DEFAULT_MULTI_GENES = ["NKX2-1", "MKI67", "BIRC5"]  # default multiselect (GUI)
+
     def build_report(self, ds):
         km = sr.km_summary(ds)
         cox_clin = sr.cox_clinical_report(ds)
         signature = sr.signature_km_report(ds)
+        single = sr.single_gene_km_report(
+            ds, self.GENE_CATALOG.get(self.DEFAULT_SINGLE_GENE, ""), self.DEFAULT_SINGLE_GENE)
+        multi_pairs = [(g, self.GENE_CATALOG[g])
+                       for g in self.DEFAULT_MULTI_GENES if g in self.GENE_CATALOG]
+        multi = sr.multi_gene_km_report(ds, multi_pairs)
         cox_genes = sr.cox_genes_report(ds)
-        return render.survival_report(km, cox_clin, signature, cox_genes)
+        return render.survival_report(km, cox_clin, signature, single, multi, cox_genes)
 
 
 class PipelineScreen(ReportScreen):

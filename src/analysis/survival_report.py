@@ -269,6 +269,54 @@ def signature_km_report(ds: pl.DataFrame) -> dict:
     return rep
 
 
+def single_gene_km_report(ds: pl.DataFrame, ensg: str, symbol: str) -> dict:
+    """KM pojedynczego genu (high/low względem mediany ekspresji) + log-rank."""
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    col = find_gene_col(ensg, gene_cols)
+    if col is None:
+        return {"error": f"Gen {symbol} ({ensg}) nie znaleziony w macierzy", "symbol": symbol}
+    expr = ds[col].to_numpy().astype(float)
+    pdf = _encode_clinical(ds.to_pandas())
+    rep = _km_split_report(pdf, expr, f"{symbol} high", f"{symbol} low")
+    rep["symbol"] = symbol
+    rep["median_expr"] = float(np.median(expr))
+    return rep
+
+
+def multi_gene_km_report(ds: pl.DataFrame, genes: list) -> list:
+    """Porównanie wielu genów: log-rank high vs low + krzywa grupy high per gen.
+
+    ``genes`` to lista par (symbol, ensg). Zwraca listę słowników
+    {symbol, p_value, note, n_high, median_os_high, high_curve} — GUI rysuje
+    krzywe high, terminal pokazuje tabelę log-rank.
+    """
+    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    pdf = _encode_clinical(ds.to_pandas())
+    results = []
+    for symbol, ensg in genes:
+        col = find_gene_col(ensg, gene_cols)
+        if col is None:
+            results.append({"symbol": symbol, "p_value": None, "note": "brak w macierzy",
+                            "n_high": 0, "median_os_high": None, "high_curve": None})
+            continue
+        expr = ds[col].to_numpy().astype(float)
+        median = float(np.median(expr))
+        high = expr >= median
+        low = ~high
+        high_stats, high_curve = _km_fit(pdf.loc[high, "time_years"], pdf.loc[high, "event"])
+        p_value = None
+        try:
+            res = logrank_test(pdf.loc[high, "time_years"], pdf.loc[low, "time_years"],
+                               pdf.loc[high, "event"], pdf.loc[low, "event"])
+            p_value = float(res.p_value)
+        except Exception:
+            p_value = None
+        results.append({"symbol": symbol, "p_value": p_value, "note": "",
+                        "n_high": int(high.sum()), "median_os_high": high_stats["median_os"],
+                        "high_curve": high_curve})
+    return results
+
+
 def cox_clinical_report(ds: pl.DataFrame) -> dict:
     """Cox kliniczny (wiek + płeć + stadium). Zwraca rows + c_index + n.
 
