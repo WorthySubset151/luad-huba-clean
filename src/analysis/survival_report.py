@@ -21,7 +21,10 @@ Metodologia (zgodna z notebookiem 06):
 - kowarianty kliniczne: wiek (per rok), płeć (męska = 1), stadium (per poziom),
 - panel genów a priori jako z-score log2(TPM+1), każdy gen osobnym predyktorem
   (kierunek HR uczy się model — znak panelu służy tylko sygnaturze KM, nie tu),
-- bez penalizera (artefakty kolinearności pokazywane świadomie).
+- Cox bez penalizera, gdy się zbiega (artefakty kolinearności pokazywane świadomie);
+  ridge penalizer (L2) włącza się automatycznie tylko jako fallback, gdy model nie
+  zbiega (np. silna kolinearność skorelowanych genów) — inaczej dashboard wywalałby
+  się zamiast policzyć wynik.
 """
 
 __author__ = "Łukasz Połaski"
@@ -317,6 +320,39 @@ def multi_gene_km_report(ds: pl.DataFrame, genes: list) -> list:
     return results
 
 
+def _fit_cox_robust(df, duration_col="time_years", event_col="event",
+                    penalizers=(0.0, 0.1, 0.5, 1.0)):
+    """Fituje model Coxa odpornie na brak zbieżności.
+
+    Najpierw próbuje bez penalizera (zachowuje pierwotny zamysł: pokazać
+    artefakty kolinearności). Gdy Newton-Raphson nie zbiega (delta = NaN —
+    zwykle silna kolinearność skorelowanych genów), zwiększa ridge penalizer
+    aż do stabilnego dopasowania. Kolumny o zerowej wariancji są odrzucane
+    (dają osobliwość, a nic nie wnoszą).
+
+    Zwraca (fitter, użyty_penalizer, odrzucone_kolumny).
+    """
+    covariates = [c for c in df.columns if c not in (duration_col, event_col)]
+    nonconstant = [c for c in covariates if df[c].nunique(dropna=True) > 1]
+    dropped = [c for c in covariates if c not in nonconstant]
+    use_df = df[[duration_col, event_col] + nonconstant]
+
+    last_exc = None
+    for pen in penalizers:
+        try:
+            cph = CoxPHFitter(penalizer=pen)
+            cph.fit(use_df, duration_col=duration_col, event_col=event_col)
+            if bool(cph.summary["coef"].isna().any()):
+                raise ValueError("NaN we współczynnikach po dopasowaniu")
+            return cph, pen, dropped
+        except Exception as exc:  # noqa: BLE001 — próbujemy kolejny penalizer
+            last_exc = exc
+            continue
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Cox nie dał się dopasować")
+
+
 def cox_clinical_report(ds: pl.DataFrame) -> dict:
     """Cox kliniczny (wiek + płeć + stadium). Zwraca rows + c_index + n.
 
@@ -331,8 +367,7 @@ def cox_clinical_report(ds: pl.DataFrame) -> dict:
         return {"error": "Za mało kompletnych obserwacji do modelu Coxa (min. 20)."}
 
     try:
-        cph = CoxPHFitter()
-        cph.fit(cox_input, duration_col="time_years", event_col="event")
+        cph, penalizer, _ = _fit_cox_robust(cox_input)
     except Exception as exc:  # ConvergenceError, kolinearność itp.
         return {"error": f"Model Coxa się nie dopasował: {exc}"}
 
@@ -350,6 +385,7 @@ def cox_clinical_report(ds: pl.DataFrame) -> dict:
     return {
         "rows": rows,
         "c_index": float(cph.concordance_index_),
+        "penalizer": penalizer,
         "n": int(cox_input.shape[0]),
         "n_events": int(cox_input["event"].sum()),
     }
@@ -392,10 +428,8 @@ def cox_genes_report(ds: pl.DataFrame) -> dict:
         return {"error": "Za mało kompletnych obserwacji do modelu Coxa (min. 20)."}
 
     try:
-        cph_clin = CoxPHFitter()
-        cph_clin.fit(combined[base], duration_col="time_years", event_col="event")
-        cph_genes = CoxPHFitter()
-        cph_genes.fit(combined, duration_col="time_years", event_col="event")
+        cph_clin, pen_clin, _ = _fit_cox_robust(combined[base])
+        cph_genes, pen_genes, _ = _fit_cox_robust(combined)
     except Exception as exc:
         return {"error": f"Model Coxa się nie dopasował: {exc}"}
 
@@ -419,6 +453,7 @@ def cox_genes_report(ds: pl.DataFrame) -> dict:
         "c_index_clinical": c_clin,
         "c_index_genes": c_genes,
         "delta": c_genes - c_clin,
+        "penalizer": max(pen_clin, pen_genes),
         "n": int(combined.shape[0]),
         "missing": missing,
     }

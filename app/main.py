@@ -330,6 +330,14 @@ def render_build_matrix(state: dict) -> None:
     st.header("Budowa macierzy ekspresji")
     st.caption("Łączenie sparsowanych parquetów w macierz geny × próbki, z filtrem biotype.")
 
+    st.markdown(
+        "Ten etap scala pojedyncze pliki STAR-Counts (surowe zliczenia odczytów na gen, "
+        "jeden plik na próbkę) w **jedną macierz geny × próbki** — wiersze to geny, kolumny "
+        "to próbki, a każda komórka to poziom ekspresji genu w danej próbce. **To źródło cech "
+        "(features) do analiz i modeli ML** — trzy wybory poniżej decydują, jak te cechy będą "
+        "wyglądać. Rozwijane „📖” pod formularzem tłumaczą skróty i pomagają wybrać świadomie."
+    )
+
     if not state["parsed"]:
         st.warning("Brak sparsowanych parquetów. Najpierw uruchom etap Parsowanie.")
         return
@@ -358,19 +366,83 @@ def render_build_matrix(state: dict) -> None:
         "Metryka ekspresji",
         options=["tpm", "unstranded", "fpkm", "fpkm_uq", "counts"],
         index=0,
-        help="Z konfiguracji: " + str(default_metric) + ". tpm/fpkm znormalizowane, counts/unstranded surowe.",
+        help="Jednostka ekspresji w macierzy. Domyślna z konfiguracji: " + str(default_metric)
+        + ". TPM/FPKM znormalizowane (porównywalne między próbkami), counts/unstranded surowe. "
+        "Szczegóły i rekomendacja w bloku „📖 Metryki ekspresji” poniżej.",
     )
     dup_strategy = col2.selectbox(
         "Strategia duplikatów",
         options=["deepest", "first", "fail"],
         index=0,
-        help="deepest = wybierz aliquot z największą sumą ekspresji (zalecane dla TCGA).",
+        help="Gdy jeden przypadek ma kilka próbek (aliquotów), która trafi do macierzy. "
+        "deepest = ta z największym sygnałem (zalecane dla TCGA). Szczegóły w bloku "
+        "„📖 Strategia duplikatów” poniżej.",
     )
     biotype = st.text_input(
         "Filtr biotype",
         value=default_biotype or "",
-        help="np. protein_coding (zatrzymuje ~33% genów). Puste = wszystkie geny.",
+        help="Które klasy genów zostawić. protein_coding = tylko geny kodujące białko "
+        "(~20 tys., mniej szumu); puste = wszystkie ~60 tys. Szczegóły w bloku "
+        "„📖 Filtr biotype” poniżej.",
     )
+
+    with st.expander("📖 Metryki ekspresji — co znaczą skróty i którą wybrać"):
+        st.markdown("**Metryka to jednostka, w jakiej zapisana jest ekspresja każdego genu.** "
+                    "Wybór wprost decyduje, czy wartości są porównywalne między próbkami — "
+                    "co jest kluczowe dla analiz i modeli ML.")
+        st.markdown("**counts / unstranded** — surowa liczba odczytów (reads) zmapowanych do "
+                    "genu; „unstranded” = zliczanie bez rozróżniania nici DNA (standard STAR w "
+                    "TCGA). Nieznormalizowane: dłuższe geny i głębiej zsekwencjonowane próbki "
+                    "mają z definicji wyższe wartości, więc bez dalszej normalizacji nie są "
+                    "porównywalne ani między genami, ani między próbkami.")
+        st.markdown("**TPM — Transcripts Per Million** — normalizuje na długość genu i głębokość "
+                    "tak, że wartości w każdej próbce sumują się do miliona. Dzięki temu są "
+                    "porównywalne MIĘDZY próbkami. Najczęstszy wybór do eksploracji i jako "
+                    "wejście do ML.")
+        st.markdown("**FPKM — Fragments Per Kilobase per Million** — też normalizuje na długość "
+                    "i głębokość, ale ich sumy nie są stałe między próbkami, co lekko obciąża "
+                    "porównania między próbkami. Zbliżony do TPM, lecz TPM jest zwykle "
+                    "preferowany.")
+        st.markdown("**FPKM-UQ (upper-quartile)** — wariant FPKM normalizowany górnym kwartylem "
+                    "zamiast całkowitą głębokością; odporniejszy na kilka skrajnie wysokich "
+                    "genów, używany w części potoków TCGA.")
+        st.markdown("**Rekomendacja:** do eksploracji i modeli ML → **TPM** (najlepiej "
+                    "log2(TPM+1)). Jeśli planujesz analizę różnicowej ekspresji narzędziami "
+                    "DESeq2/edgeR → wybierz **counts**, bo one oczekują surowych zliczeń i "
+                    "normalizują je same.")
+        st.markdown("**Pod ML:** metryka to jednostka Twoich cech. Do modeli porównujących "
+                    "próbki (klasyfikacja, przeżycie) używaj TPM/log-TPM. Surowe counts podawaj "
+                    "tylko narzędziom normalizującym wewnętrznie. Niespójna metryka między "
+                    "próbkami = obciążenie i ryzyko wycieku.")
+
+    with st.expander("📖 Strategia duplikatów — skąd się biorą i którą wybrać"):
+        st.markdown("**Jeden przypadek (pacjent) bywa zsekwencjonowany w kilku próbkach — "
+                    "aliquotach:** np. dwa wycinki tego samego guza albo powtórki techniczne. "
+                    "Macierz potrzebuje jednej kolumny na próbkę, więc trzeba zdecydować, którą "
+                    "wziąć.")
+        st.markdown("**deepest** — bierze aliquot z największą sumą ekspresji (proxy głębokości "
+                    "sekwencjonowania: najwięcej sygnału, najmniej szumu). **Zalecane dla TCGA** "
+                    "i deterministyczne.")
+        st.markdown("**first** — bierze pierwszy napotkany, arbitralnie. Szybkie, ale wybór nie "
+                    "jest biologicznie uzasadniony ani stabilny między buildami.")
+        st.markdown("**fail** — przerywa budowę z błędem, gdy wykryje duplikat. Wybierz, gdy "
+                    "chcesz ręcznie rozstrzygnąć każdy przypadek.")
+        st.markdown("**Pod ML:** spójny, deterministyczny wybór (deepest) daje powtarzalną "
+                    "macierz — ta sama próbka trafia do cech przy każdym buildzie, bez "
+                    "przypadkowej zmienności psującej porównania modeli.")
+
+    with st.expander("📖 Filtr biotype — co to jest i po co filtrować"):
+        st.markdown("**Biotyp to klasa funkcjonalna genu** z anotacji: protein_coding (koduje "
+                    "białko), lncRNA, miRNA, pseudogene, rRNA i inne. STAR zlicza WSZYSTKIE "
+                    "(~60 tys.), ale duża część to geny niekodujące i pseudogeny o niskiej, "
+                    "szumnej ekspresji.")
+        st.markdown("**protein_coding** — zostawia tylko geny kodujące białko (~19–20 tys., "
+                    "czyli ~33% z ~60 tys.). Mniej szumu; standard do większości analiz.")
+        st.markdown("**puste pole** — zatrzymuje wszystkie geny. Wybierz świadomie, gdy "
+                    "interesują Cię klasy niekodujące (lncRNA, miRNA itp.).")
+        st.markdown("**Pod ML:** filtr to redukcja wymiaru i szumu już na wejściu — mniej cech, "
+                    "za to każda niesie więcej sygnału, co zmniejsza ryzyko przeuczenia. Puste "
+                    "zostaw tylko przy świadomym badaniu genów niekodujących.")
 
     if state["matrix_built"]:
         st.info("Macierz już istnieje — ponowne budowanie ją nadpisze.")
