@@ -757,7 +757,7 @@ def _render_sample_clinical(ds, sample_col: str) -> None:
         st.caption(" | ".join(info_parts))
 
 
-def _dash_explain(co, po_co=None, jak=None, ml=None, label=None):
+def _dash_explain(co):
     """Jednozdaniowy podpis pod wykresem (co pokazuje). Pełny przewodnik: README."""
     st.caption("ℹ️ " + co)
 
@@ -860,12 +860,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd wykresu KM overall: {exc}")
 
-        _dash_explain(
-            co="Krzywą przeżycia całej kohorty: jaki odsetek pacjentów żyje po danym czasie (spada z liczbą zgonów). Zacieniony pas to 95% przedział ufności — im węższy, tym pewniejsze oszacowanie.",
-            po_co="Punkt odniesienia (baseline) przed jakimkolwiek podziałem na grupy. Mediana OS oraz przeżycia 1/3/5-letnie to standardowe liczby, które można porównać z literaturą i danymi referencyjnymi TCGA.",
-            jak="Krzywa jest schodkowa — każdy schodek w dół to zdarzenie (zgon). Im wolniej opada, tym lepsze rokowanie. Mediana OS to czas, w którym przeżywa połowa kohorty. Pas ufności rozszerza się na końcu, bo coraz mniej pacjentów obserwowanych tak długo — ostatnim latom ufaj mniej.",
-            ml="To rozkład zmiennej celu (target). Potwierdza, że etykieta time/event jest sensowna (mediana ~4 lata, bez dziwnych artefaktów). To zdarzenia, nie cenzury, niosą informację, z której model się uczy — dlatego ich liczba, a nie sama liczebność kohorty, wyznacza realną moc.",
-        )
+        _dash_explain(co="Krzywą przeżycia całej kohorty: jaki odsetek pacjentów żyje po danym czasie (spada z liczbą zgonów). Zacieniony pas to 95% przedział ufności — im węższy, tym pewniejsze oszacowanie.")
         st.divider()
         st.subheader("Kaplan-Meier — per stadium")
         st.caption("Stadium zaawansowania jako najsilniejszy predyktor kliniczny.")
@@ -878,12 +873,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd wykresu KM per stage: {exc}")
 
-        _dash_explain(
-            co="Te same krzywe przeżycia, ale rozbite na stadia AJCC I–IV — każda grupa osobno — plus wynik testu log-rank na różnice między nimi.",
-            po_co="Sanity check etykiety: najsilniejszy znany czynnik kliniczny (stadium) MUSI rozdzielać przeżycie. Jeśli nie rozdziela, dane albo etykieta są podejrzane i nie ma sensu budować na nich modelu.",
-            jak="Krzywe powinny układać się w wachlarz: stadium I najwyżej (najlepsze rokowanie), IV najniżej. Log-rank p < 0,05 oznacza istotne różnice; tu p ≈ 1e-12, czyli krzywe są wyraźnie i bardzo silnie rozdzielone.",
-            ml="Dowód, że target niesie wyuczalny sygnał i że oczywista zmienna działa zgodnie z biologią. To także poprzeczka: sensowny model na ekspresji powinien pobić ten czysto kliniczny baseline, inaczej nic nie wnosi.",
-        )
+        _dash_explain(co="Te same krzywe przeżycia, ale rozbite na stadia AJCC I–IV — każda grupa osobno — plus wynik testu log-rank na różnice między nimi.")
         st.divider()
         st.subheader("Model Coxa — kowarianty kliniczne")
         st.caption("Proporcjonalne hazardy (wiek + płeć + stadium). Forest plot "
@@ -904,12 +894,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd modelu Coxa: {exc}")
 
-        _dash_explain(
-            co="Model proporcjonalnych hazardów Coxa: ile każdy czynnik (wiek, płeć, stadium) dokłada do ryzyka zgonu niezależnie od pozostałych. Forest plot pokazuje HR z 95% przedziałem ufności, tabela podaje liczby.",
-            po_co="Baseline predykcyjny oparty WYŁĄCZNIE na klinice. To punkt odniesienia, który ekspresja genów musi pobić, żeby jej dodawanie miało sens (mierzone niżej w sekcji klinika + geny).",
-            jak="HR > 1 = wyższe ryzyko, HR < 1 = czynnik ochronny. Jeśli 95% CI przecina 1, efekt jest nieistotny. C-index: 0,5 = losowy, 1,0 = idealny; baseline kliniczny zwykle 0,6–0,7. Tu stadium jest istotne, wiek i płeć nie — typowe dla LUAD.",
-            ml="To Twój benchmark — każdy model na ekspresji porównuj z tym C-index. Pokazuje też, które kowarianty trzeba kontrolować, żeby sygnał genowy nie okazał się tylko przebraniem za stadium (uniknięcie pozornej wartości dodanej).",
-        )
+        _dash_explain(co="Model proporcjonalnych hazardów Coxa: ile każdy czynnik (wiek, płeć, stadium) dokłada do ryzyka zgonu niezależnie od pozostałych. Forest plot pokazuje HR z 95% przedziałem ufności, tabela podaje liczby.")
         st.divider()
         st.subheader("Kaplan-Meier — sygnatura wielogenowa")
         st.caption("Panel ekspresyjny a priori (różnicowanie + proliferacja + inwazja). "
@@ -924,12 +909,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd wykresu sygnatury: {exc}")
 
-        _dash_explain(
-            co="Pacjentów podzielonych na grupy high/low według łącznego score 7-genowego panelu (różnicowanie + proliferacja + inwazja), z testem log-rank między grupami.",
-            po_co="Pierwszy sprawdzian, czy to EKSPRESJA (a nie klinika) rozdziela przeżycie — czyli czy cechy molekularne w ogóle niosą sygnał prognostyczny.",
-            jak="Rozjazd dwóch krzywych = sygnatura różnicuje rokowanie. Log-rank p < 0,05 = istotne; tu p ≈ 0,02 (umiarkowane). Rozjazd mniejszy niż przy stadium — sygnał realny, ale słabszy niż kliniczny.",
-            ml="Dowód koncepcji, że featury (ekspresja) korelują z targetem. Score liczony jest a priori — z ustalonych wag, bez douczania na tych danych — więc ocena jest uczciwa i wolna od wycieku informacji (data leakage).",
-        )
+        _dash_explain(co="Pacjentów podzielonych na grupy high/low według łącznego score 7-genowego panelu (różnicowanie + proliferacja + inwazja), z testem log-rank między grupami.")
         st.divider()
         st.subheader("Kaplan-Meier — pojedynczy gen")
         st.caption("Wybierz gen, by zobaczyć stratyfikację przeżycia high/low względem mediany ekspresji.")
@@ -961,12 +941,7 @@ def render_dashboard(state: dict) -> None:
                 except Exception as exc:
                     st.error(f"Błąd wykresu genu: {exc}")
 
-        _dash_explain(
-            co="Dla wybranego z listy genu — przeżycie grupy o ekspresji powyżej vs poniżej mediany — z krótką charakterystyką biologiczną genu i testem log-rank.",
-            po_co="Eksploracja pojedynczych cech: który gen sam z siebie rozdziela przeżycie. Wartość edukacyjna i hipotezotwórcza, do ręcznego przeglądu.",
-            jak="Patrz na rozjazd krzywych i log-rank p. Uwaga: pojedynczy gen rzadko daje silny efekt, a przeglądając wiele genów łatwo trafić na fałszywy alarm — dlatego niżej jest korekcja FDR. Opis nieistotne (trend) znaczy: kierunek widać, ale dowód za słaby.",
-            ml="Podgląd siły pojedynczej cechy (univariate screening). Ale NIE selekcjonuj cech tylko po tych p-wartościach — wybieranie najlepszych genów na całych danych prowadzi do przeuczenia; od rzetelnej selekcji jest walidacja krzyżowa.",
-        )
+        _dash_explain(co="Dla wybranego z listy genu — przeżycie grupy o ekspresji powyżej vs poniżej mediany — z krótką charakterystyką biologiczną genu i testem log-rank.")
         st.divider()
         st.subheader("Kaplan-Meier — porównanie wielu genów")
         st.caption("Wybierz kilka genów, by porównać prognostyczny efekt ich "
@@ -1006,12 +981,7 @@ def render_dashboard(state: dict) -> None:
         elif len(selected_multi) == 1:
             st.info("Wybierz co najmniej 2 geny do porównania.")
 
-        _dash_explain(
-            co="Krzywe grup high dla kilku wybranych genów naraz na jednym wykresie, plus tabelę log-rank p osobno dla każdego genu.",
-            po_co="Szybkie porównanie, które geny mają najsilniejszy efekt prognostyczny w grupie wysokiej ekspresji — wstępny ranking cech.",
-            jak="Niżej leżąca krzywa high danego genu = jego wysoka ekspresja wiąże się z gorszym rokowaniem (gen ryzyka). W tabeli p < 0,05 = istotny pojedynczo. To wciąż testy uniwariackie, bez korekcji na wielokrotność.",
-            ml="Wstępny ranking cech do dalszej analizy. Zgodność z biologią buduje zaufanie do featurów: geny proliferacyjne (MKI67, BIRC5) zwykle wychodzą jako ryzyka, geny różnicowania (NKX2-1) jako ochronne.",
-        )
+        _dash_explain(co="Krzywe grup high dla kilku wybranych genów naraz na jednym wykresie, plus tabelę log-rank p osobno dla każdego genu.")
         st.divider()
         st.subheader("Model Coxa — klinika + panel genów")
         st.caption("Czy panel ekspresyjny dodaje wartość prognostyczną PONAD model kliniczny? "
@@ -1043,12 +1013,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd modelu Coxa (geny): {exc}")
 
-        _dash_explain(
-            co="Model łączący klinikę I panel genów, z bezpośrednim porównaniem C-index: sama klinika vs klinika + geny. Forest plot pokazuje HR genów już po korekcie o klinikę.",
-            po_co="Kluczowe pytanie całej zakładki: czy ekspresja dodaje wartość PONAD to, co już wiadomo z kliniki — czyli inkrementalną wartość prognostyczną.",
-            jak="Patrz na Δ C-index. Dodatnie (tu +0,025) = geny dokładają sygnał ponad klinikę, choć skromnie. Pojedyncze geny bywają nieistotne, a model i tak lepszy — bo sygnał tkwi w KOMBINACJI. Uwaga na kolinearność: geny proliferacyjne są skorelowane i dzielą się efektem.",
-            ml="Najmocniejszy argument za sensem modelu na ekspresji: featury wnoszą coś nowego ponad baseline. Δ C-index to uczciwa miara wartości dodanej. Skromne +0,025 ustawia realistyczne oczekiwania — nie spodziewaj się cudów po modelu na tych cechach.",
-        )
+        _dash_explain(co="Model łączący klinikę I panel genów, z bezpośrednim porównaniem C-index: sama klinika vs klinika + geny. Forest plot pokazuje HR genów już po korekcie o klinikę.")
         # ===== Rygor statystyczny: α, FDR panelu, sensitivity (jedno źródło: sr) =====
         st.divider()
         st.subheader("Rygor statystyczny — α, korekcja FDR, sensitivity analysis")
@@ -1093,12 +1058,7 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd raportu statystycznego: {exc}")
 
-        _dash_explain(
-            co="Dwie poprawki uczciwości statystycznej: (1) korekcję wielokrotnego testowania Benjamini-Hochberg (FDR) na panelu 7 genów — surowe p obok q po korekcie; (2) sensitivity analysis Schoenfelda: jak silny efekt (HR) da się w ogóle wykryć przy danej liczbie zdarzeń.",
-            po_co="Testując 7 genów część istotnych trafień to przypadek — FDR to koryguje. Sensitivity zastępuje nieważny post-hoc power i mówi, czego od tych danych w ogóle można oczekiwać.",
-            jak="q (FDR) < α oznacza istotność PO korekcie. Tu single-gene 6/7 przeżywa, ale w Coxie 0/7 — po korekcie o klinikę żaden gen nie jest istotny SAM, co potwierdza, że sygnał jest w kombinacji. Min. wykrywalny HR to próg czułości: efekty słabsze niż on po prostu przeoczysz.",
-            ml="Wyznacza realistyczny sufit: przy tej liczbie zdarzeń wykryjesz HR rzędu ≥ 1,5, słabszych nie — nie oczekuj od modelu wychwycenia mikro-efektów. FDR to ta sama dyscyplina, która chroni przed wyborem cech na szumie przy feature selection w ML.",
-        )
+        _dash_explain(co="Dwie poprawki uczciwości statystycznej: (1) korekcję wielokrotnego testowania Benjamini-Hochberg (FDR) na panelu 7 genów — surowe p obok q po korekcie; (2) sensitivity analysis Schoenfelda: jak silny efekt (HR) da się w ogóle wykryć przy danej liczbie zdarzeń.")
     # ===== ZAKŁADKA EKSPRESJA =====
     with tab_expr:
         st.markdown(
@@ -1134,12 +1094,7 @@ def render_dashboard(state: dict) -> None:
                         + ("filtr biotypów zastosowany" if esum["biotype_filtered"]
                            else "bez filtra biotypów")
                     )
-                    _dash_explain(
-                        co="Podstawowe parametry macierzy cech: wymiar (geny × próbki), wykrytą metrykę normalizacji, medianę ekspresji, odsetek wartości zerowych, rozstęp i głębokość sekwencjonowania.",
-                        po_co="Pierwszy rzut na format i jakość cech, zanim spojrzysz na rozkłady. Metryka normalizacji decyduje, czy wartości w ogóle są porównywalne między próbkami.",
-                        jak="Wykryta metryka decyduje o porównywalności: TPM normalizuje tak, że sumy są stałe między próbkami (najlepsze pod ML); FPKM/RPKM są zbliżone, ale ich sumy się wahają, co lekko obciąża porównania między próbkami; surowe counts wymagają normalizacji (np. TMM/DESeq2) przed modelem. Zera ~13% to normalna rzadkość RNA-seq. Filtr biotypów = tylko geny kodujące, czyli mniej szumu.",
-                        ml="Format cech wprost rzutuje na pipeline ML. Niezależnie od metryki log2(x+1) ściąga długi ogon i stabilizuje wariancję — typowe wejście do modelu. Wysoka rzadkość → preferuj modele odporne na zera i regularyzację (L1/L2). Jeśli wykryto FPKM, rozważ przeliczenie na TPM dla uczciwych porównań między próbkami.",
-                    )
+                    _dash_explain(co="Podstawowe parametry macierzy cech: wymiar (geny × próbki), wykrytą metrykę normalizacji, medianę ekspresji, odsetek wartości zerowych, rozstęp i głębokość sekwencjonowania.")
                     st.divider()
 
                 st.subheader("Rozkład ekspresji (log2 TPM)")
@@ -1161,12 +1116,7 @@ def render_dashboard(state: dict) -> None:
                 except Exception as exc:
                     st.error(f"Błąd histogramu: {exc}")
 
-                _dash_explain(
-                    co="Histogram ekspresji log2(TPM+1) dla jednej wybranej próbki — ile genów ma jaki poziom ekspresji — wraz z danymi klinicznymi tej próbki.",
-                    po_co="Kontrola jakości pojedynczej próbki: czy jej rozkład wygląda zdrowo, zgodnie z typowym profilem RNA-seq.",
-                    jak="Zdrowy profil jest bimodalny: wysoki pik przy ~0 (geny wyłączone) i szerszy garb przy wyższej ekspresji (geny aktywne). Brak drugiego garbu, pojedynczy pik albo dziwny kształt = próbka podejrzana.",
-                    ml="Wykrywanie próbek odstających i artefaktów na poziomie pojedynczej próbki, zanim trafią do treningu (zła próbka psuje model). Transformacja logarytmiczna widoczna tu to częsty preprocessing — ściąga ogon przed podaniem cech do modelu.",
-                )
+                _dash_explain(co="Histogram ekspresji log2(TPM+1) dla jednej wybranej próbki — ile genów ma jaki poziom ekspresji — wraz z danymi klinicznymi tej próbki.")
                 st.divider()
                 st.subheader("Ekspresja markerów LUAD")
                 st.caption("Rozkład ekspresji klasycznych markerów raka płuca po wszystkich próbkach. "
@@ -1180,12 +1130,7 @@ def render_dashboard(state: dict) -> None:
                 except Exception as exc:
                     st.error(f"Błąd wykresu markerów: {exc}")
 
-                _dash_explain(
-                    co="Rozkład ekspresji znanych markerów raka płuca (EGFR, KRAS, TP53, ALK, NKX2-1, SFTPC i in.) po wszystkich próbkach — wykres pudełkowy na gen.",
-                    po_co="Walidacja biologiczna macierzy: czy markery zachowują się zgodnie z wiedzą. Jeśli tak, to dane mierzą realną biologię, a nie szum lub pomieszane identyfikatory.",
-                    jak="NKX2-1 i SFTPC (różnicowanie pneumocytów) zwykle wysokie; ALK i ROS1 (onkogenne przez fuzje, nie przez nadekspresję) zwykle niskie. Zgodność z tym wzorcem = dane wiarygodne; rażące odstępstwa = problem z macierzą lub anotacją genów.",
-                    ml="Sanity check cech — potwierdza, że kolumny faktycznie odpowiadają genom i niosą sensowny sygnał biologiczny. To fundament zaufania do featurów: bez tego nie wiadomo, czy model uczy się biologii, czy artefaktu mapowania.",
-                )
+                _dash_explain(co="Rozkład ekspresji znanych markerów raka płuca (EGFR, KRAS, TP53, ALK, NKX2-1, SFTPC i in.) po wszystkich próbkach — wykres pudełkowy na gen.")
                 if "error" not in esum:
                     st.divider()
                     st.subheader("Batch — ośrodki TSS")
@@ -1200,12 +1145,7 @@ def render_dashboard(state: dict) -> None:
                     except Exception as exc:
                         st.error(f"Błąd wykresu TSS: {exc}")
 
-                    _dash_explain(
-                        co="Ile próbek pochodzi z którego ośrodka (TSS — Tissue Source Site, zakodowany w barkodzie TCGA). Słupki posortowane od najliczniejszego ośrodka.",
-                        po_co="Wykrycie efektu batch — technicznego źródła zmienności (różne ośrodki = różne protokoły pobrania i sekwencjonowania). To największe ryzyko confoundingu w danych wieloośrodkowych.",
-                        jak="Silna nierównowaga (tu jeden ośrodek ~100 próbek, ogon po kilka) = ryzyko. Niebezpiecznie robi się, gdy ośrodek koreluje z wynikiem — wtedy model może uczyć się ośrodka zamiast biologii. Idealnie batch jest równomierny albo przynajmniej nieskorelowany z targetem.",
-                        ml="Czerwona flaga do sprawdzenia: batch może wyciekać do modelu (batch leakage), dając pozorną skuteczność, która nie uogólni się na nowe dane. Środki zaradcze: korekcja batcha (ComBat/limma), dodanie TSS jako kowarianty oraz sprawdzenie w PCA, czy główna oś zmienności nie pokrywa się z ośrodkiem.",
-                    )
+                    _dash_explain(co="Ile próbek pochodzi z którego ośrodka (TSS — Tissue Source Site, zakodowany w barkodzie TCGA). Słupki posortowane od najliczniejszego ośrodka.")
                     st.divider()
                     st.subheader("PCA — wariancja składowych")
                     st.caption(
@@ -1221,12 +1161,7 @@ def render_dashboard(state: dict) -> None:
                     else:
                         st.info("PCA nie policzona dla tej macierzy.")
 
-                    _dash_explain(
-                        co="Ile zmienności w danych tłumaczy każda główna składowa (PC1–5). PCA liczona na najbardziej zmiennych genach, po log2 i standaryzacji (z-score).",
-                        po_co="Mapa głównych osi zmienności macierzy. Pytanie kluczowe: czy największa zmienność (PC1) to biologia (np. stadium, podtyp), czy artefakt techniczny (batch)?",
-                        jak="PC1 ≈ 17% — jedna oś umiarkowanie dominuje. Sam wykres NIE mówi, co to jest — trzeba nałożyć kolor: stadium, ośrodek TSS, głębokość. Jeśli punkty układają się wg ośrodka, dominuje batch (źle); jeśli wg stadium — biologia (dobrze).",
-                        ml="Diagnoza struktury i confoundingu cech: jeśli największa zmienność jest techniczna, model ją podchwyci, więc najpierw trzeba ją skorygować. PCA bywa też redukcją wymiaru przed modelem (z ~20 tys. genów do kilkudziesięciu składowych), co ogranicza przeuczenie.",
-                    )
+                    _dash_explain(co="Ile zmienności w danych tłumaczy każda główna składowa (PC1–5). PCA liczona na najbardziej zmiennych genach, po log2 i standaryzacji (z-score).")
 
     # ===== ZAKŁADKA GOTOWOŚĆ ML =====
     with tab_ml:
