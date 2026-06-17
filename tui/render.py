@@ -16,6 +16,7 @@ from rich.text import Text
 GREEN = "#33ff66"   # fosfor — wartości
 DIM = "#1f9d4d"     # przygaszona zieleń — etykiety/ramki
 RISK = "#ff5f56"    # czerwień — ryzyko / brak / istotny brak
+WARN = "#ffcf5f"    # bursztyn — ostrzeżenie / warto sprawdzić (jak żółty w GUI)
 HEAD = "bold #8affb0"  # jasna zieleń — nagłówki sekcji
 
 _BOX = box.SQUARE
@@ -362,3 +363,98 @@ def expression_report(s: dict) -> Group:
             mk.add_row(m["symbol"], Text("brak w macierzy", style=RISK), "—")
 
     return Group(head, sub, Text(""), dist, Text(""), mk, Text(""), tss, Text(""), pca)
+
+
+# ---------------------------------------------------------------------------
+#  VALIDATE — walidacja kohorty (QC); klasyfikacja z src/validate/report_view
+# ---------------------------------------------------------------------------
+def qc_report(data: dict) -> Group:
+    head = Text("WALIDACJA KOHORTY — QC", style=HEAD)
+    if "error" in data:
+        return Group(head, Text(""), Text(data["error"], style=RISK))
+
+    sub = Text("  Spójność: dopasowanie próbek do plików STAR, danych klinicznych, duplikaty.",
+               style=DIM)
+    c = data["classified"]
+
+    summ = Table(box=_BOX, border_style=DIM, show_header=False)
+    summ.add_column(style=DIM)
+    summ.add_column(style=GREEN, justify="right")
+    summ.add_row("Parquetów do sprawdzenia", str(data.get("n_parsed", "—")))
+    summ.add_row("Wszystkie rozjazdy", str(c["total"]))
+    summ.add_row("Obsługiwane automatycznie", str(c["n_handled"]))
+    summ.add_row("Wymagają uwagi", str(c["n_action"]))
+
+    vstyle = GREEN if c["verdict_level"] == "ok" else WARN
+    verdict = Text("  " + c["verdict"], style=vstyle)
+
+    parts = [head, sub, Text(""), summ, Text(""), verdict]
+
+    if c["action_by_cat"]:
+        parts += [Text(""), Text("WARTO SPRAWDZIĆ", style=f"bold {WARN}")]
+        for cat, items in c["action_by_cat"].items():
+            label = c["labels"].get(cat, cat)
+            parts.append(Text(f"  ⚠ {label} ({len(items)})", style=WARN))
+            action = c["actions"].get(cat, "")
+            if action:
+                parts.append(Text(f"      {action}", style=DIM))
+            for issue in items:
+                parts.append(Text(f"      • {issue['message']}", style=GREEN))
+
+    if c["handled_by_cat"]:
+        parts += [Text(""), Text("OBSŁUGIWANE AUTOMATYCZNIE PRZEZ PIPELINE", style=HEAD),
+                  Text("  Typowe dla TCGA — pipeline radzi sobie sam. Pokazane dla transparentności.",
+                       style=DIM)]
+        for cat, items in c["handled_by_cat"].items():
+            label = c["labels"].get(cat, cat)
+            parts.append(Text(f"  {label} ({len(items)})", style=DIM))
+            action = c["actions"].get(cat, "")
+            if action:
+                parts.append(Text(f"      {action}", style=DIM))
+            for issue in items[:50]:
+                ctx = issue.get("context", {})
+                sample = ctx.get("sample_id") or ctx.get("case_id") or ctx.get("stem", "")
+                suffix = f"  ({sample})" if sample else ""
+                parts.append(Text(f"      • {issue['message']}{suffix}", style=DIM))
+            if len(items) > 50:
+                parts.append(Text(f"      … oraz {len(items) - 50} więcej (pełny raport JSON)",
+                                  style=DIM))
+
+    return Group(*parts)
+
+
+# ---------------------------------------------------------------------------
+#  CONFIG — konfiguracja pipeline'u (read-only): wartości + surowy YAML
+# ---------------------------------------------------------------------------
+def config_report(data: dict) -> Group:
+    head = Text("KONFIGURACJA PIPELINE'U", style=HEAD)
+    if "error" in data:
+        return Group(head, Text(""), Text(data["error"], style=RISK))
+
+    cfg = data["cfg"]
+    sub = Text(f"  {data.get('path', 'configs/default.yaml')}   (podgląd — edycja w GUI)",
+               style=DIM)
+
+    norm = cfg.get("normalization", {}) or {}
+    biot = norm.get("biotype_filter")
+    nt = Table(box=_BOX, border_style=DIM, title="NORMALIZACJA", title_style=HEAD,
+               show_header=False)
+    nt.add_column(style=DIM)
+    nt.add_column(style=GREEN, justify="right")
+    nt.add_row("Metryka (method)", str(norm.get("method", "tpm")))
+    nt.add_row("Filtr biotype", str(biot) if biot else "(brak — wszystkie geny)")
+    nt.add_row("Min próbek z ekspresją", str(norm.get("min_samples_expressed", 10)))
+
+    surv = cfg.get("survival", {}) or {}
+    stab = Table(box=_BOX, border_style=DIM, title="PRZEŻYWALNOŚĆ", title_style=HEAD,
+                 show_header=False)
+    stab.add_column(style=DIM)
+    stab.add_column(style=GREEN, justify="right")
+    stab.add_row("Min follow-up [dni]", str(surv.get("min_follow_up_days", 30)))
+    stab.add_row("Usuń artefakty time<=0", "tak" if surv.get("drop_zero_time", True) else "nie")
+
+    raw = data.get("raw", "")
+    yaml_head = Text("PEŁNY YAML", style=HEAD)
+    yaml_body = Text("  " + raw.replace("\n", "\n  ").rstrip(), style=DIM)
+
+    return Group(head, sub, Text(""), nt, Text(""), stab, Text(""), yaml_head, yaml_body)

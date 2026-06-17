@@ -28,6 +28,7 @@ from src.transform.survival_dataset import build_survival_dataset
 from src.cli_config import load_config, get_nested, resolve_metric, ConfigError
 from src.validate.runner import run_cohort_qc, discover_stems, save_qc_report
 from src.validate.qc_result import Severity, QCCategory
+from src.validate.report_view import classify_qc
 from src.ingest.gdc_client import (
     build_files_filter, query_files, parse_files_response, download_files, GDCClientError,
 )
@@ -561,89 +562,43 @@ def render_validate(state: dict) -> None:
 
 def _render_qc_report(summary: dict, issues: list) -> None:
     """Renderuje raport QC: werdykt kontekstowy + problemy z wyjaśnieniem."""
-    # Kategorie obsługiwane automatycznie przez pipeline (nie wymagają interwencji)
-    HANDLED_BY_PIPELINE = {
-        "missing_clinical", "missing_survival", "orphan_star_file", "duplicate_sample",
-    }
-    # Co pipeline robi z każdą kategorią (wyjaśnienie dla użytkownika)
-    pipeline_action = {
-        "missing_clinical": "Pomijane przy budowie zbioru przeżywalności (brak danych klinicznych).",
-        "missing_survival": "Pomijane przy budowie zbioru przeżywalności (brak czasu obserwacji lub statusu).",
-        "orphan_star_file": "Ignorowane przy budowie macierzy (plik STAR bez próbki w sample sheet).",
-        "duplicate_sample": "Obsługiwane przez strategię duplikatów (deepest/first) przy budowie macierzy.",
-        "missing_star_file": "Próbka nie wejdzie do macierzy — jeśli oczekiwano pliku STAR, sprawdź pobieranie.",
-    }
-    category_labels = {
-        "missing_star_file": "Brakujący plik STAR",
-        "orphan_star_file": "Osierocony plik STAR (bez próbki)",
-        "missing_clinical": "Brak danych klinicznych",
-        "duplicate_sample": "Duplikat próbki",
-        "missing_survival": "Brak danych przeżycia",
-    }
-
-    # Podział problemów: obsługiwane vs wymagające uwagi
-    handled = [i for i in issues if i["category"] in HANDLED_BY_PIPELINE]
-    action_needed = [i for i in issues if i["category"] not in HANDLED_BY_PIPELINE]
+    c = classify_qc(summary, issues)
 
     # Podsumowanie liczbowe
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Wszystkie rozjazdy", summary["total"])
-    c2.metric("Obsługiwane automatycznie", len(handled))
-    c3.metric("Wymagają uwagi", len(action_needed))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Wszystkie rozjazdy", c["total"])
+    col2.metric("Obsługiwane automatycznie", c["n_handled"])
+    col3.metric("Wymagają uwagi", c["n_action"])
 
-    # Werdykt kontekstowy - zależny od typu, nie liczby
-    if not issues:
-        st.success("Kohorta w pełni spójna — brak rozjazdów.")
-        log_path = st.session_state.get("qc_log_path")
-        if log_path:
-            st.caption(f"Raport JSON: `{log_path}`")
-        return
-
-    if not action_needed:
-        st.success(
-            f"Kohorta gotowa do analizy. Wykryto {len(handled)} rozjazdów typowych "
-            f"dla danych TCGA — wszystkie obsługiwane automatycznie przez pipeline "
-            f"(pominięcie przy budowie zbioru przeżywalności lub deduplikacja). "
-            f"Nie wymagają ręcznej interwencji."
-        )
+    # Werdykt kontekstowy (jedno źródło: report_view.classify_qc)
+    if c["verdict_level"] == "ok":
+        st.success(c["verdict"])
     else:
-        st.warning(
-            f"Wykryto {len(action_needed)} rozjazdów wartych sprawdzenia "
-            f"(poniżej) oraz {len(handled)} typowych dla TCGA (obsługiwanych automatycznie)."
-        )
+        st.warning(c["verdict"])
 
     log_path = st.session_state.get("qc_log_path")
     if log_path:
         st.caption(f"Raport JSON: `{log_path}`")
 
-    # Sekcja: wymagające uwagi (jeśli są) - pokazane jako pierwsze, rozwinięte
-    if action_needed:
+    # Sekcja: wymagające uwagi (pokazane jako pierwsze, rozwinięte)
+    if c["action_by_cat"]:
         st.subheader("Warto sprawdzić")
-        # grupowanie po kategorii
-        cats = {}
-        for i in action_needed:
-            cats.setdefault(i["category"], []).append(i)
-        for cat, items in cats.items():
-            label = category_labels.get(cat, cat)
-            with st.expander(f"⚠️ {label} ({len(items)})", expanded=True):
-                st.caption(pipeline_action.get(cat, ""))
+        for cat, items in c["action_by_cat"].items():
+            with st.expander(f"⚠️ {c['labels'].get(cat, cat)} ({len(items)})", expanded=True):
+                st.caption(c["actions"].get(cat, ""))
                 for issue in items:
                     st.markdown(f"- {issue['message']}")
 
     # Sekcja: obsługiwane automatycznie (zwinięte, informacyjne)
-    if handled:
+    if c["handled_by_cat"]:
         st.subheader("Obsługiwane automatycznie przez pipeline")
         st.caption(
             "Poniższe rozjazdy są typowe dla danych TCGA i nie wymagają działania — "
             "pipeline radzi sobie z nimi sam. Pokazane dla pełnej transparentności."
         )
-        cats = {}
-        for i in handled:
-            cats.setdefault(i["category"], []).append(i)
-        for cat, items in cats.items():
-            label = category_labels.get(cat, cat)
-            with st.expander(f"{label} ({len(items)})", expanded=False):
-                st.caption(pipeline_action.get(cat, ""))
+        for cat, items in c["handled_by_cat"].items():
+            with st.expander(f"{c['labels'].get(cat, cat)} ({len(items)})", expanded=False):
+                st.caption(c["actions"].get(cat, ""))
                 for issue in items[:50]:
                     ctx = issue.get("context", {})
                     ctx_str = ""

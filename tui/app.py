@@ -31,9 +31,17 @@ from textual.widgets import Footer, Input, Label, ListItem, ListView, Static  # 
 from src.analysis import survival_report as sr  # noqa: E402
 from src.analysis.expression_report import expression_summary, LUAD_MARKERS  # noqa: E402
 from src.pipeline_status import pipeline_status  # noqa: E402
+from src.validate.runner import run_cohort_qc, discover_stems  # noqa: E402
+from src.validate.report_view import classify_qc  # noqa: E402
+from src.ingest.sample_sheet_parser import parse_sample_sheet  # noqa: E402
+from src.ingest.clinical_parser import parse_clinical  # noqa: E402
+import yaml  # noqa: E402
 from tui import render  # noqa: E402
 
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
+DATA_RAW = PROJECT_ROOT / "data" / "raw"
+DATA_INTERIM = PROJECT_ROOT / "data" / "interim" / "star_counts"
+CONFIG_PATH = PROJECT_ROOT / "configs" / "default.yaml"
 SURVIVAL_PARQUET = DATA_PROCESSED / "survival_dataset.parquet"
 EXPRESSION_MATRIX = DATA_PROCESSED / "expression_matrix.parquet"
 VERSION = "v0.1"
@@ -44,6 +52,8 @@ MENU = [
     ("1", "SURVIVAL", "Analiza przeżywalności (Kaplan-Meier + Cox HR)", "survival"),
     ("2", "PIPELINE", "Status etapów ETL (zbiory danych, kompletność)", "pipeline"),
     ("3", "EXPRESSION", "Macierz ekspresji (rozkład, batch TSS, PCA)", "expression"),
+    ("4", "VALIDATE", "Walidacja kohorty (QC — spójność próbek/klinika)", "validate"),
+    ("5", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -171,6 +181,71 @@ class ExpressionScreen(ReportScreen):
         content.update(render.expression_report(expression_summary(EXPRESSION_MATRIX)))
 
 
+def _find_sample_sheet():
+    sheets = sorted(DATA_RAW.glob("gdc_sample_sheet*.tsv"))
+    return sheets[0] if sheets else None
+
+
+def _run_qc() -> dict:
+    """Uruchamia QC kohorty (read-only). Zwraca dane dla render.qc_report
+    albo {'error': ...} gdy brak wymaganych metadanych."""
+    sheet = _find_sample_sheet()
+    clinical = DATA_RAW / "clinical.tsv"
+    stems = discover_stems(DATA_INTERIM)
+    missing = []
+    if not stems:
+        missing.append(f"sparsowane parquety STAR w {DATA_INTERIM}")
+    if sheet is None:
+        missing.append(f"sample sheet (gdc_sample_sheet*.tsv) w {DATA_RAW}")
+    if not clinical.exists():
+        missing.append(f"clinical.tsv w {DATA_RAW}")
+    if missing:
+        return {"error": "BRAK DANYCH DO WALIDACJI\n\n  - " + "\n  - ".join(missing)
+                + "\n\nUruchom najpierw etapy Pobieranie + Parsowanie (CLI lub dashboard)."}
+    try:
+        sheet_df = parse_sample_sheet(sheet)
+        clinical_df = parse_clinical(clinical)
+        report = run_cohort_qc(sheet_df, clinical_df, stems)
+        issues = [i.to_dict() for i in report.issues]
+        return {"classified": classify_qc(report.summary(), issues), "n_parsed": len(stems)}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"BŁĄD WALIDACJI:\n  {type(exc).__name__}: {exc}"}
+
+
+def _read_config() -> dict:
+    """Czyta configs/default.yaml (read-only). Zwraca dane dla render.config_report."""
+    if not CONFIG_PATH.exists():
+        return {"error": f"BRAK PLIKU KONFIGURACYJNEGO:\n  {CONFIG_PATH}"}
+    try:
+        raw = CONFIG_PATH.read_text(encoding="utf-8")
+        cfg = yaml.safe_load(raw) or {}
+        return {"cfg": cfg, "raw": raw, "path": str(CONFIG_PATH.relative_to(PROJECT_ROOT))}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"BŁĄD ODCZYTU YAML:\n  {type(exc).__name__}: {exc}"}
+
+
+class ValidateScreen(ReportScreen):
+    """Walidacja kohorty (QC) — read-only; działa też gdy brak metadanych."""
+
+    PANEL_ID = "LUADHUB.VALD"
+    TITLE_TXT = "VALIDATE — WALIDACJA KOHORTY"
+
+    def action_refresh(self) -> None:
+        content = self.query_one("#content", Static)
+        content.update(render.qc_report(_run_qc()))
+
+
+class ConfigScreen(ReportScreen):
+    """Konfiguracja pipeline'u (read-only) — wartości + surowy YAML."""
+
+    PANEL_ID = "LUADHUB.CONF"
+    TITLE_TXT = "CONFIG — KONFIGURACJA"
+
+    def action_refresh(self) -> None:
+        content = self.query_one("#content", Static)
+        content.update(render.config_report(_read_config()))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -219,6 +294,10 @@ class PrimaryMenu(Screen):
             self.app.push_screen(PipelineScreen())
         elif action == "expression":
             self.app.push_screen(ExpressionScreen())
+        elif action == "validate":
+            self.app.push_screen(ValidateScreen())
+        elif action == "config":
+            self.app.push_screen(ConfigScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
