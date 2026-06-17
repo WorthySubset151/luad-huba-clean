@@ -42,6 +42,7 @@ from src.ingest.clinical_parser import parse_clinical  # noqa: E402
 from src.ingest.star_parser import parse_star_counts, StarParserError  # noqa: E402
 from src.ingest.file_naming import STAR_FILE_PATTERNS, extract_star_file_stem  # noqa: E402
 from src.transform.expression_matrix import build_expression_matrix  # noqa: E402
+from src.transform.survival_dataset import build_survival_dataset  # noqa: E402
 from src.cli_config import resolve_metric, ConfigError  # noqa: E402
 import yaml  # noqa: E402
 from tui import render  # noqa: E402
@@ -64,6 +65,7 @@ MENU = [
     ("5", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
     ("6", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
     ("7", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
+    ("8", "DATASET", "Budowa zbioru przeżywalności (macierz + clinical → parquet)", "dataset"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -475,6 +477,125 @@ class BuildMatrixScreen(Screen):
             Text(f"Błąd budowy macierzy:\n  {msg}", style=render.RISK))
 
 
+class BuildSurvivalScreen(Screen):
+    """Budowa zbioru przeżywalności: macierz + clinical → survival_dataset.parquet (worker)."""
+
+    PANEL_ID = "LUADHUB.SURB"
+    TITLE_TXT = "BUILD DATASET — ZBIÓR PRZEŻYWALNOŚCI"
+    BINDINGS = [
+        Binding("f4", "build", "PF4 Buduj"),
+        Binding("f3,escape", "app.pop_screen", "PF3 Koniec"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield PanelHeader(self.PANEL_ID, self.TITLE_TXT)
+        with Vertical(id="surv-wrap"):
+            yield Static(id="surv-plan")
+            yield ProgressBar(id="surv-progress", show_eta=False)
+            yield Static(id="surv-status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#surv-progress", ProgressBar).display = False
+        self._render_plan()
+
+    def _opts(self) -> dict:
+        cfgdata = _read_config()
+        cfg = cfgdata.get("cfg", {}) if "cfg" in cfgdata else {}
+        surv = cfg.get("survival", {}) or {}
+        return {
+            "tumor_only": True,  # domyślnie jak w GUI
+            "drop_zero_time": bool(surv.get("drop_zero_time", True)),
+            "min_follow_up_days": int(surv.get("min_follow_up_days", 30)),
+        }
+
+    def _prereqs(self):
+        matrix = DATA_PROCESSED / "expression_matrix.parquet"
+        sheet = _find_sample_sheet()
+        clinical = DATA_RAW / "clinical.tsv"
+        problems = []
+        if not matrix.exists():
+            problems.append(f"brak macierzy ({matrix.name}) — najpierw MATRIX")
+        if sheet is None:
+            problems.append(f"brak sample sheet (gdc_sample_sheet*.tsv) w {DATA_RAW}")
+        if not clinical.exists():
+            problems.append(f"brak clinical.tsv w {DATA_RAW}")
+        return matrix, sheet, clinical, problems
+
+    def _render_plan(self) -> None:
+        matrix, sheet, clinical, problems = self._prereqs()
+        o = self._opts()
+        t = Table(box=render._BOX, border_style=render.DIM, show_header=False)
+        t.add_column(style=render.DIM)
+        t.add_column(style=render.GREEN, justify="right")
+        t.add_row("Tylko nowotworowe", "tak" if o["tumor_only"] else "nie")
+        t.add_row("Usuń artefakty time<=0", "tak" if o["drop_zero_time"] else "nie")
+        t.add_row("Min follow-up [dni]", str(o["min_follow_up_days"]))
+        t.add_row("Wyjście", "data/processed/survival_dataset.parquet")
+        head = Text("Macierz + sample sheet + clinical → zbiór przeżywalności (filtry warunkowe)",
+                    style=render.HEAD)
+        self.query_one("#surv-plan", Static).update(Group(head, Text(""), t))
+
+        status = self.query_one("#surv-status", Static)
+        if problems:
+            status.update(Text("BRAK DANYCH:\n  - " + "\n  - ".join(problems), style=render.RISK))
+        else:
+            status.update(Text("Gotowe. Naciśnij PF4 aby zbudować zbiór.", style=render.GREEN))
+
+    def action_build(self) -> None:
+        if self._busy:
+            return
+        matrix, sheet, clinical, problems = self._prereqs()
+        if problems:
+            self._render_plan()
+            return
+        self._busy = True
+        pbar = self.query_one("#surv-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=None)  # nieokreślony — build nie raportuje kroków
+        self.query_one("#surv-status", Static).update(
+            Text("Budowanie zbioru (wczytywanie + integracja + filtry)…", style=render.GREEN))
+        self._build_worker(matrix, sheet, clinical, self._opts())
+
+    @work(thread=True, exclusive=True)
+    def _build_worker(self, matrix_path, sheet, clinical, opts) -> None:
+        try:
+            matrix = pl.read_parquet(matrix_path)
+            sheet_df = parse_sample_sheet(sheet)
+            clinical_df = parse_clinical(clinical)
+            dataset = build_survival_dataset(
+                matrix, sheet_df, clinical_df,
+                tumor_only=opts["tumor_only"],
+                min_follow_up_days=opts["min_follow_up_days"],
+                drop_zero_time=opts["drop_zero_time"],
+            )
+            DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+            dataset.write_parquet(DATA_PROCESSED / "survival_dataset.parquet")
+            n = dataset.height
+            ev = int(dataset["event"].sum()) if "event" in dataset.columns else 0
+            cens = (1 - ev / n) * 100 if n else 0.0
+            self.app.call_from_thread(self._done, n, ev, cens)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(self._fail, f"{type(exc).__name__}: {exc}")
+
+    def _done(self, n: int, ev: int, cens: float) -> None:
+        self._busy = False
+        self.query_one("#surv-progress", ProgressBar).update(total=1, progress=1)
+        self.query_one("#surv-status", Static).update(Text(
+            f"✓ Zbiór: {n} próbek, zdarzenia {ev}, cenzura {cens:.1f}% "
+            "→ data/processed/survival_dataset.parquet", style=render.GREEN))
+
+    def _fail(self, msg: str) -> None:
+        self._busy = False
+        self.query_one("#surv-progress", ProgressBar).display = False
+        self.query_one("#surv-status", Static).update(
+            Text(f"Błąd budowy zbioru:\n  {msg}", style=render.RISK))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -531,6 +652,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(IngestScreen())
         elif action == "matrix":
             self.app.push_screen(BuildMatrixScreen())
+        elif action == "dataset":
+            self.app.push_screen(BuildSurvivalScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
