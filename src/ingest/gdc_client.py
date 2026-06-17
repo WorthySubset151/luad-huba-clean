@@ -134,6 +134,26 @@ def _retry_wait():
     return wait_exponential(multiplier=1, min=2, max=30)
 
 
+def _run_async(coro):
+    """Uruchamia korutynę niezależnie od tego, czy w wątku działa już pętla zdarzeń.
+
+    asyncio.run rzuca, gdy pętla już działa. W terminalu (worker w osobnym wątku)
+    i w CLI pętli nie ma — normalna ścieżka. Streamlit 1.35+ bywa, że trzyma pętlę
+    w wątku skryptu — wtedy odpalamy pobieranie w osobnym wątku z własną pętlą,
+    żeby GUI nie wywaliło się na "asyncio.run() cannot be called from a running
+    event loop".
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
 def build_files_filter(
     project_id: str = DEFAULT_PROJECT_ID,
     workflow_type: str = DEFAULT_WORKFLOW_TYPE,
@@ -430,7 +450,7 @@ def download_files(
             progress_callback(done, total, name)
 
     try:
-        results = asyncio.run(
+        results = _run_async(
             _download_all_async(
                 metadata, output_dir, max_retries, timeout,
                 max_concurrency, skip_existing, _on_done, _transport,
