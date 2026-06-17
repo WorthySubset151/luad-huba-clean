@@ -225,3 +225,68 @@ def pipeline_report(status: dict) -> Group:
         style=DIM,
     )
     return Group(head, Text(""), stages, Text(""), datasets, Text(""), root_line)
+
+
+# ---------------------------------------------------------------------------
+#  EXPRESSION — podsumowanie macierzy ekspresji
+# ---------------------------------------------------------------------------
+def expression_report(s: dict) -> Group:
+    if "error" in s:
+        return Group(Text("MACIERZ EKSPRESJI", style=HEAD), Text("  " + s["error"], style=RISK))
+
+    metric = s["distribution"]["metric"]
+    biotyp = (f"filtr biotypów zastosowany (pełny GENCODE ≈ {s['gencode_total']:,})"
+              if s["biotype_filtered"]
+              else f"bez filtra biotypów (≈ pełny GENCODE {s['gencode_total']:,})")
+    head = Text.assemble(
+        ("MACIERZ EKSPRESJI — TCGA-LUAD", HEAD),
+        (f"      {s['n_genes']:,} genów × {s['n_samples']} próbek", DIM),
+    )
+    sub = Text(f"  {biotyp}     metryka wykryta z danych: {metric}", style=DIM)
+
+    d = s["distribution"]
+    dist = Table(box=_BOX, border_style=DIM, title="ROZKŁAD WARTOŚCI",
+                 title_style=HEAD, show_header=False)
+    dist.add_column(style=DIM)
+    dist.add_column(style=GREEN, justify="right")
+    dist.add_row("Mediana", f"{d['median']:.2f}")
+    dist.add_row("IQR (p25–p75)", f"{d['p25']:.2f} – {d['p75']:.2f}")
+    dist.add_row("Maksimum", f"{d['max']:,.0f}")
+    dist.add_row("Wartości zerowe", f"{d['zero_pct']:.1f}%")
+    dist.add_row("Mediana głębokości (suma/próbkę)", f"{d['median_depth']:,.0f}")
+
+    tss = Table(box=_BOX, border_style=DIM, title_style=HEAD,
+                title=f"BATCH — OŚRODKI TSS ({s['parsed_tss']}/{s['n_tss']} z barkodu)")
+    tss.add_column("TSS", style=DIM)
+    tss.add_column("Próbki", justify="right", style=GREEN)
+    tss.add_column("%", justify="right", style=GREEN)
+    rows = s["tss_rows"]
+    cap = 20
+    for r in rows[:cap]:
+        tss.add_row(r["tss"], str(r["n"]), f"{r['pct']:.1f}%")
+    if len(rows) > cap:
+        rest = sum(r["n"] for r in rows[cap:])
+        tss.add_row(f"… pozostałe ({len(rows) - cap})", str(rest),
+                    f"{100.0 * rest / s['n_samples']:.1f}%")
+
+    pca = Table(box=_BOX, border_style=DIM, title_style=HEAD,
+                title=f"PCA (top {s['pca_top_n']} zmiennych genów, log2 + z-score)")
+    pca.add_column("Składowa", style=DIM)
+    pca.add_column("% wariancji", justify="right", style=GREEN)
+    if s["pcs"]:
+        for p in s["pcs"]:
+            pca.add_row(f"PC{p['pc']}", f"{p['var_pct']:.1f}%")
+    else:
+        pca.add_row("—", "nie policzono")
+
+    mk = Table(box=_BOX, border_style=DIM, title="MARKERY LUAD", title_style=HEAD)
+    mk.add_column("Gen", style=DIM)
+    mk.add_column(f"Mediana ({metric})", justify="right", style=GREEN)
+    mk.add_column("Mediana log2", justify="right", style=GREEN)
+    for m in s["markers"]:
+        if m["found"]:
+            mk.add_row(m["symbol"], f"{m['median']:.2f}", f"{m['median_log2']:.2f}")
+        else:
+            mk.add_row(m["symbol"], Text("brak w macierzy", style=RISK), "—")
+
+    return Group(head, sub, Text(""), dist, Text(""), tss, Text(""), pca, Text(""), mk)

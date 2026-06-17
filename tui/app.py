@@ -29,11 +29,13 @@ from textual.screen import Screen  # noqa: E402
 from textual.widgets import Footer, Input, Label, ListItem, ListView, Static  # noqa: E402
 
 from src.analysis import survival_report as sr  # noqa: E402
+from src.analysis.expression_report import expression_summary  # noqa: E402
 from src.pipeline_status import pipeline_status  # noqa: E402
 from tui import render  # noqa: E402
 
 DATA_PROCESSED = PROJECT_ROOT / "data" / "processed"
 SURVIVAL_PARQUET = DATA_PROCESSED / "survival_dataset.parquet"
+EXPRESSION_MATRIX = DATA_PROCESSED / "expression_matrix.parquet"
 VERSION = "v0.1"
 
 # (kod opcji, nazwa, opis, akcja)
@@ -41,6 +43,7 @@ MENU = [
     ("0", "STATUS", "Przegląd kohorty (próbki, zdarzenia, geny, stadia)", "status"),
     ("1", "SURVIVAL", "Analiza przeżywalności (Kaplan-Meier + Cox HR)", "survival"),
     ("2", "PIPELINE", "Status etapów ETL (zbiory danych, kompletność)", "pipeline"),
+    ("3", "EXPRESSION", "Macierz ekspresji (rozkład, batch TSS, PCA)", "expression"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -144,6 +147,18 @@ class PipelineScreen(ReportScreen):
         content.update(render.pipeline_report(pipeline_status(PROJECT_ROOT)))
 
 
+class ExpressionScreen(ReportScreen):
+    """Podsumowanie macierzy ekspresji (rozkład, batch TSS, PCA, markery)."""
+
+    PANEL_ID = "LUADHUB.EXPR"
+    TITLE_TXT = "EXPRESSION — MACIERZ EKSPRESJI"
+
+    def action_refresh(self) -> None:
+        # expression_summary sam zgłasza brak macierzy jako {'error': ...}.
+        content = self.query_one("#content", Static)
+        content.update(render.expression_report(expression_summary(EXPRESSION_MATRIX)))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -190,6 +205,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(SurvivalScreen())
         elif action == "pipeline":
             self.app.push_screen(PipelineScreen())
+        elif action == "expression":
+            self.app.push_screen(ExpressionScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
