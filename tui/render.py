@@ -221,10 +221,68 @@ def _multi_gene_block(results: list) -> Group:
     return Group(head, t)
 
 
-def survival_report(km: dict, cox_clinical: dict, signature: dict,
-                    single_gene: dict, multi_gene: list, cox_genes: dict) -> Group:
-    sep = Text("─" * 66, style=DIM)
+def _fdr_table(title: str, rep: dict) -> Group:
+    head = Text(title, style=HEAD)
+    if "error" in rep:
+        return Group(head, Text("  " + rep["error"], style=DIM))
+    t = Table(box=_BOX, border_style=DIM)
+    t.add_column("Gen", style=DIM)
+    t.add_column("p (surowe)", justify="right", style=GREEN)
+    t.add_column("q (BH-FDR)", justify="right", style=GREEN)
+    t.add_column("FDR<α", justify="center")
+    for r in rep["rows"]:
+        ok = r["reject_fdr"]
+        t.add_row(
+            r["name"],
+            _fmt_p(r["p"]),
+            _fmt_p(r["q"]),
+            Text("TAK" if ok else "—", style=f"bold {GREEN}" if ok else DIM),
+        )
+    summ = Text.assemble(
+        ("  istotnych: surowo ", DIM), (f'{rep["n_sig_raw"]}', GREEN),
+        (" → po korekcji FDR ", DIM), (f'{rep["n_sig_fdr"]}', f"bold {GREEN}"),
+        (f' z {rep["n_tested"]} testowanych', DIM),
+    )
+    return Group(head, t, summ)
+
+
+def _stat_rigor_block(stat: dict) -> Group:
+    head = Text("RYGOR STATYSTYCZNY", style=HEAD)
+    alpha_line = Text.assemble(
+        ("  Poziom istotności α = ", DIM), (f'{stat["alpha"]}', f"bold {GREEN}"),
+        ("   (dwustronnie; korekcja wielokrotności: Benjamini-Hochberg FDR)", DIM),
+    )
+    sens = stat["sensitivity"]
+    s_head = Text("Sensitivity analysis (Schoenfeld) — wykrywalność, nie post-hoc power", style=HEAD)
+    line_ev = Text.assemble(
+        ("  zdarzeń (events): ", DIM), (f'{sens["n_events"]}', f"bold {GREEN}"),
+        ("   ·   median split (allocation 0.5)", DIM),
+    )
+    mdh_txt = Text("  Min. wykrywalny HR:  ", style=DIM)
+    for pw, hr in sens["min_detectable_hr"].items():
+        mdh_txt.append(f"@{pw:.0%} moc → HR {hr:.2f}     ", style=GREEN)
+    pah_txt = Text("  Moc dla HR:          ", style=DIM)
+    for hr, pw in sens["power_at_hr"].items():
+        col = GREEN if pw >= 0.80 else WARN if pw >= 0.5 else RISK
+        pah_txt.append(f"HR {hr} → {pw:.0%}    ", style=col)
+    note = Text("  Post-hoc power z obserwowanego efektu jest nieważne (Hoenig & Heisey 2001);\n"
+                "  dla przeżycia liczą się zdarzenia, nie liczba pacjentów (n = cała kohorta).",
+                style=DIM)
     return Group(
+        head, alpha_line, Text(""),
+        _fdr_table("FDR panelu — single-gene (log-rank KM)", stat["fdr_single_gene"]),
+        Text(""),
+        _fdr_table("FDR panelu — Cox (multivariate)", stat["fdr_cox"]),
+        Text(""),
+        s_head, line_ev, mdh_txt, pah_txt, note,
+    )
+
+
+def survival_report(km: dict, cox_clinical: dict, signature: dict,
+                    single_gene: dict, multi_gene: list, cox_genes: dict,
+                    stat: dict | None = None) -> Group:
+    sep = Text("─" * 66, style=DIM)
+    parts = [
         _km_block(km),
         Text(""), sep, Text(""),
         _cox_clinical_block(cox_clinical),
@@ -236,7 +294,10 @@ def survival_report(km: dict, cox_clinical: dict, signature: dict,
         _multi_gene_block(multi_gene),
         Text(""), sep, Text(""),
         _cox_genes_block(cox_genes),
-    )
+    ]
+    if stat is not None:
+        parts += [Text(""), sep, Text(""), _stat_rigor_block(stat)]
+    return Group(*parts)
 
 
 # ---------------------------------------------------------------------------

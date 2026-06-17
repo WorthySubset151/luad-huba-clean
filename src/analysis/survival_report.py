@@ -422,3 +422,160 @@ def cox_genes_report(ds: pl.DataFrame) -> dict:
         "n": int(combined.shape[0]),
         "missing": missing,
     }
+
+
+# ---------------------------------------------------------------------------
+#  Rygor statystyczny: poziom istotności, korekcja FDR, sensitivity analysis
+# ---------------------------------------------------------------------------
+ALPHA = 0.05  # jawny próg istotności dla całej analizy (dwustronnie)
+
+
+def benjamini_hochberg(pvalues: list) -> list:
+    """Korekcja Benjamini-Hochberg (FDR). Zwraca q-wartości w oryginalnej kolejności.
+
+    Mniej konserwatywna niż Bonferroni — kontroluje odsetek fałszywych odkryć
+    (FDR), nie rodzinny błąd I rodzaju (FWER). Wartości None są pomijane w
+    korekcji i zwracane jako None (np. gen nieobecny w macierzy).
+    """
+    valid_idx = [i for i, p in enumerate(pvalues)
+                 if p is not None and not (isinstance(p, float) and np.isnan(p))]
+    out: list = [None] * len(pvalues)
+    if not valid_idx:
+        return out
+    p = np.array([pvalues[i] for i in valid_idx], dtype=float)
+    m = len(p)
+    order = np.argsort(p)
+    ranked = p[order]
+    q = ranked * m / np.arange(1, m + 1)
+    q = np.minimum.accumulate(q[::-1])[::-1]   # monotoniczność od największej w dół
+    q = np.clip(q, 0.0, 1.0)
+    q_in_order = np.empty(m)
+    q_in_order[order] = q
+    for j, i in enumerate(valid_idx):
+        out[i] = float(q_in_order[j])
+    return out
+
+
+def multiple_testing_report(named_pvalues: list, alpha: float = ALPHA) -> dict:
+    """Korekcja wielokrotnego testowania (BH-FDR) dla nazwanych testów.
+
+    named_pvalues: lista (nazwa, p_value). Zwraca tabelę rows posortowaną po p
+    rosnąco z kolumnami name/p/q/reject_raw/reject_fdr oraz licznikami: ile
+    istotnych surowo vs po korekcji. Pokazuje, które wyniki przeżywają FDR.
+    """
+    pvals = [p for _, p in named_pvalues]
+    qvals = benjamini_hochberg(pvals)
+    rows = []
+    for (name, p), q in zip(named_pvalues, qvals):
+        rows.append({
+            "name": name,
+            "p": p,
+            "q": q,
+            "reject_raw": (p is not None and p < alpha),
+            "reject_fdr": (q is not None and q < alpha),
+        })
+    rows.sort(key=lambda r: (r["p"] is None, r["p"] if r["p"] is not None else 1.0))
+    return {
+        "alpha": alpha,
+        "method": "Benjamini-Hochberg (FDR)",
+        "rows": rows,
+        "n_tested": sum(1 for p in pvals if p is not None),
+        "n_sig_raw": sum(1 for r in rows if r["reject_raw"]),
+        "n_sig_fdr": sum(1 for r in rows if r["reject_fdr"]),
+    }
+
+
+def gene_panel_fdr_report(ds: pl.DataFrame, source: str = "single_gene",
+                          alpha: float = ALPHA) -> dict:
+    """Korekcja FDR (BH) dla panelu 7 genów sygnatury.
+
+    source='single_gene' — p z log-rank KM (high/low per gen);
+    source='cox' — p z multivariate Cox (klinika + geny). Zwraca
+    multiple_testing_report na p-wartościach panelu, plus 'source'.
+    """
+    named = []
+    if source == "cox":
+        rep = cox_genes_report(ds)
+        if "error" in rep:
+            return {"error": rep["error"], "source": source}
+        named = [(r["symbol"], r.get("p")) for r in rep["rows"]]
+    else:
+        for symbol, (ensg, _sign) in SIGNATURE_PANEL.items():
+            rep = single_gene_km_report(ds, ensg, symbol)
+            named.append((symbol, rep.get("logrank_p") if "error" not in rep else None))
+    if not any(p is not None for _, p in named):
+        return {"error": "Brak wartości p do korekcji (panel nieobecny w macierzy).",
+                "source": source}
+    out = multiple_testing_report(named, alpha=alpha)
+    out["source"] = source
+    return out
+
+
+def schoenfeld_min_hr(n_events: int, alpha: float = ALPHA, power: float = 0.80,
+                      allocation: float = 0.5) -> float:
+    """Minimalny wykrywalny HR przy danej liczbie ZDARZEŃ (wzór Schoenfelda 1983).
+
+    Test log-rank/Coxa: ln(HR) = (z_{1-α/2} + z_power) / sqrt(d·p1·p2), gdzie
+    d = liczba zdarzeń, p1/p2 = proporcje grup (allocation=0.5 → median split).
+    Zwraca HR > 1 (kierunek ryzyka; odwrotność = kierunek ochronny).
+    """
+    from scipy.stats import norm
+    import math
+    if n_events <= 0:
+        return float("inf")
+    p1, p2 = allocation, 1.0 - allocation
+    za = norm.ppf(1.0 - alpha / 2.0)
+    zb = norm.ppf(power)
+    ln_hr = (za + zb) / math.sqrt(n_events * p1 * p2)
+    return float(math.exp(ln_hr))
+
+
+def schoenfeld_power(n_events: int, hr: float, alpha: float = ALPHA,
+                     allocation: float = 0.5) -> float:
+    """Moc testu log-rank/Coxa dla danego HR i liczby ZDARZEŃ (wzór Schoenfelda)."""
+    from scipy.stats import norm
+    import math
+    if n_events <= 0 or hr <= 0:
+        return 0.0
+    p1, p2 = allocation, 1.0 - allocation
+    za = norm.ppf(1.0 - alpha / 2.0)
+    zb = math.sqrt(n_events * p1 * p2) * abs(math.log(hr)) - za
+    return float(norm.cdf(zb))
+
+
+def sensitivity_report(n_events: int, alpha: float = ALPHA, allocation: float = 0.5,
+                       powers: tuple = (0.80, 0.90),
+                       hr_grid: tuple = (1.3, 1.5, 1.75, 2.0)) -> dict:
+    """Sensitivity analysis (Schoenfeld) — poprawna alternatywa dla post-hoc power.
+
+    Dla posiadanej liczby ZDARZEŃ podaje minimalny wykrywalny HR przy mocy 80%/90%
+    oraz moc dla siatki HR. Mówi, jak mały efekt jest wykrywalny — w przeciwieństwie
+    do post-hoc power liczonej z OBSERWOWANEGO efektu, która jest nieważna
+    (Hoenig & Heisey 2001) i tylko przelicza p-wartość. Dla przeżycia liczą się
+    zdarzenia, nie liczba pacjentów (n jest tu dane — cała kohorta TCGA).
+    """
+    return {
+        "n_events": int(n_events),
+        "alpha": alpha,
+        "allocation": allocation,
+        "min_detectable_hr": {pw: schoenfeld_min_hr(n_events, alpha, pw, allocation)
+                              for pw in powers},
+        "power_at_hr": {hr: schoenfeld_power(n_events, hr, alpha, allocation)
+                        for hr in hr_grid},
+        "note": ("Median split (allocation 0.5). Post-hoc power z obserwowanego "
+                 "efektu jest nieważne — to sensitivity analysis ex ante."),
+    }
+
+
+def statistical_rigor_report(ds: pl.DataFrame, alpha: float = ALPHA) -> dict:
+    """Zbiorczy raport rygoru: α, FDR panelu (single-gene + Cox), sensitivity.
+
+    Jedno źródło dla GUI i terminala. n_events z cohort_summary.
+    """
+    n_events = cohort_summary(ds).get("n_events", 0)
+    return {
+        "alpha": alpha,
+        "fdr_single_gene": gene_panel_fdr_report(ds, source="single_gene", alpha=alpha),
+        "fdr_cox": gene_panel_fdr_report(ds, source="cox", alpha=alpha),
+        "sensitivity": sensitivity_report(n_events, alpha=alpha),
+    }

@@ -850,6 +850,50 @@ def render_dashboard(state: dict) -> None:
         except Exception as exc:
             st.error(f"Błąd modelu Coxa (geny): {exc}")
 
+        # ===== Rygor statystyczny: α, FDR panelu, sensitivity (jedno źródło: sr) =====
+        st.divider()
+        st.subheader("Rygor statystyczny — α, korekcja FDR, sensitivity analysis")
+        st.caption("Poprawki metodologiczne: jawny próg istotności, korekcja wielokrotnego "
+                   "testowania (Benjamini-Hochberg FDR) na panelu 7 genów oraz sensitivity "
+                   "analysis (Schoenfeld) zamiast nieważnego post-hoc power.")
+        try:
+            stat = sr.statistical_rigor_report(ds)
+            st.markdown(f"**Poziom istotności α = {stat['alpha']}** (dwustronnie; "
+                        "korekcja wielokrotności: Benjamini-Hochberg FDR)")
+
+            cfdr1, cfdr2 = st.columns(2)
+            for col, key, title in ((cfdr1, "fdr_single_gene", "FDR — single-gene (log-rank KM)"),
+                                    (cfdr2, "fdr_cox", "FDR — Cox (multivariate)")):
+                with col:
+                    st.markdown(f"**{title}**")
+                    fr = stat[key]
+                    if "error" in fr:
+                        st.info(fr["error"])
+                    else:
+                        tbl = pl.DataFrame({
+                            "Gen": [r["name"] for r in fr["rows"]],
+                            "p (surowe)": [r["p"] for r in fr["rows"]],
+                            "q (BH-FDR)": [r["q"] for r in fr["rows"]],
+                            "FDR<α": ["TAK" if r["reject_fdr"] else "—" for r in fr["rows"]],
+                        })
+                        st.dataframe(tbl, use_container_width=True, hide_index=True)
+                        st.caption(f"Istotnych: surowo {fr['n_sig_raw']} → po FDR "
+                                   f"{fr['n_sig_fdr']} z {fr['n_tested']}.")
+
+            sens = stat["sensitivity"]
+            st.markdown(f"**Sensitivity analysis (Schoenfeld)** — przy {sens['n_events']} "
+                        "zdarzeniach (median split):")
+            mc = st.columns(len(sens["min_detectable_hr"]))
+            for j, (pw, hr) in enumerate(sens["min_detectable_hr"].items()):
+                mc[j].metric(f"Min. wykrywalny HR @ {pw:.0%} mocy", f"{hr:.2f}")
+            pc = st.columns(len(sens["power_at_hr"]))
+            for j, (hr, pw) in enumerate(sens["power_at_hr"].items()):
+                pc[j].metric(f"Moc @ HR={hr}", f"{pw:.0%}")
+            st.caption("Post-hoc power z obserwowanego efektu jest nieważne (Hoenig & Heisey 2001); "
+                       "dla przeżycia liczą się zdarzenia, nie liczba pacjentów (n = cała kohorta TCGA).")
+        except Exception as exc:
+            st.error(f"Błąd raportu statystycznego: {exc}")
+
     # ===== ZAKŁADKA EKSPRESJA =====
     with tab_expr:
         # Macierz ekspresji (osobny plik - większy)

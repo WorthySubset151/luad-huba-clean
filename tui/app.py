@@ -175,7 +175,8 @@ class SurvivalScreen(ReportScreen):
                        for g in self.DEFAULT_MULTI_GENES if g in self.GENE_CATALOG]
         multi = sr.multi_gene_km_report(ds, multi_pairs)
         cox_genes = sr.cox_genes_report(ds)
-        return render.survival_report(km, cox_clin, signature, single, multi, cox_genes)
+        stat = sr.statistical_rigor_report(ds)
+        return render.survival_report(km, cox_clin, signature, single, multi, cox_genes, stat)
 
 
 class PipelineScreen(ReportScreen):
