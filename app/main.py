@@ -761,6 +761,42 @@ def _dash_explain(co, po_co=None, jak=None, ml=None, label=None):
     st.caption("ℹ️ " + co)
 
 
+# Pastelowa paleta statusów dla zakładki Gotowość ML — stonowana, pod ciepłe GUI.
+_ML_PASTEL = {
+    "green":  {"bg": "rgba(122,155,94,0.13)",  "bar": "#7a9b5e", "dot": "#8caf6e"},
+    "yellow": {"bg": "rgba(201,166,74,0.15)",  "bar": "#c2a24a", "dot": "#d4b45e"},
+    "red":    {"bg": "rgba(191,122,106,0.15)", "bar": "#bd7a6a", "dot": "#cf8a78"},
+    "info":   {"bg": "rgba(150,150,140,0.11)", "bar": "#9a9a90", "dot": "#adad9f"},
+}
+
+
+def _html_esc(s) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _ml_card_html(m: dict) -> str:
+    """Pastelowa karta metryki: miękkie tło + boczny akcent + kropka statusu."""
+    c = _ML_PASTEL.get(m["status"], _ML_PASTEL["info"])
+    action = (
+        f'<div style="font-size:0.82em;margin-top:4px;opacity:0.85;">\u279C '
+        f'{_html_esc(m["action"])}</div>'
+        if m.get("action") else ""
+    )
+    return (
+        f'<div style="border-left:4px solid {c["bar"]};background:{c["bg"]};'
+        f'padding:9px 13px;margin:6px 0;border-radius:6px;">'
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;">'
+        f'<span style="font-weight:600;">'
+        f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;'
+        f'background:{c["dot"]};margin-right:8px;vertical-align:middle;"></span>'
+        f'{_html_esc(m["label"])}</span>'
+        f'<span style="font-weight:700;white-space:nowrap;">{_html_esc(m["value"])}</span>'
+        f'</div>'
+        f'<div style="font-size:0.82em;opacity:0.72;margin-top:4px;">{_html_esc(m["note"])}</div>'
+        f'{action}</div>'
+    )
+
+
 def render_dashboard(state: dict) -> None:
     """Dashboard analityczny - wizualizacje ekspresji i przeżywalności."""
     st.header("Dashboard analityczny")
@@ -1196,7 +1232,8 @@ def render_dashboard(state: dict) -> None:
         st.markdown(
             "**Gotowość danych pod uczenie maszynowe.** Metryki oceniające, czy ta macierz "
             "ekspresji i etykiety nadają się jako materiał do modeli (docelowo multimodalnych). "
-            "Kontrolki na skróty: 🟢 OK · 🟡 wymaga uwagi · 🔴 wymaga działania."
+            "Kontrolki na skróty: zielona = OK, bursztynowa = wymaga uwagi, "
+            "czerwona = wymaga działania."
         )
         with st.expander("🎯 Co znaczy „dane gotowe pod ML”"):
             st.markdown("Dane nadają się do uczenia maszynowego, gdy: **1)** target jest dobrze "
@@ -1217,29 +1254,33 @@ def render_dashboard(state: dict) -> None:
             _report = None
         if _report:
             _summ = _report["summary"]
-            _dot = {"green": "🟢", "yellow": "🟡", "red": "🔴", "info": "⚪"}
-            _vline = f"{_dot[_summ['verdict_status']]} {_summ['verdict']}"
-            if _summ["verdict_status"] == "green":
-                st.success(_vline)
-            elif _summ["verdict_status"] == "yellow":
-                st.warning(_vline)
-            else:
-                st.error(_vline)
-            st.caption(
-                f"Kontrolki:   🟢 {_summ['green']}    🟡 {_summ['yellow']}    🔴 {_summ['red']}"
+            _vc = _ML_PASTEL[_summ["verdict_status"]]
+            _bg = _ML_PASTEL["green"]["bar"]
+            _by = _ML_PASTEL["yellow"]["bar"]
+            _br = _ML_PASTEL["red"]["bar"]
+            st.markdown(
+                f'<div style="border-left:6px solid {_vc["bar"]};background:{_vc["bg"]};'
+                f'padding:14px 18px;border-radius:8px;margin:2px 0 12px 0;">'
+                f'<div style="font-size:1.05em;font-weight:650;">'
+                f'{_html_esc(_summ["verdict"])}</div>'
+                f'<div style="font-size:0.85em;opacity:0.78;margin-top:6px;">Kontrolki: '
+                f'<b style="color:{_bg};">\u25CF {_summ["green"]}</b> OK &nbsp;\u00B7&nbsp; '
+                f'<b style="color:{_by};">\u25CF {_summ["yellow"]}</b> uwaga &nbsp;\u00B7&nbsp; '
+                f'<b style="color:{_br};">\u25CF {_summ["red"]}</b> działanie</div></div>',
+                unsafe_allow_html=True,
             )
             if _summ["actions"]:
-                with st.expander("🔧 Zalecane kroki przygotowania danych pod ML", expanded=True):
-                    for _a in _summ["actions"]:
-                        st.markdown("- " + _a)
+                st.markdown("**Zalecane kroki przygotowania danych pod ML**")
+                for _a in _summ["actions"]:
+                    st.markdown("- " + _a)
             for _grp in _report["groups"]:
                 if not _grp["metrics"]:
                     continue
-                st.subheader(_grp["title"])
-                for _m in _grp["metrics"]:
-                    st.markdown(f"{_dot[_m['status']]} **{_m['label']}:** {_m['value']}")
-                    _tail = _m["note"] + ("  ·  ➜ " + _m["action"] if _m["action"] else "")
-                    st.caption(_tail)
+                st.markdown(f"##### {_grp['title']}")
+                st.markdown(
+                    "".join(_ml_card_html(_m) for _m in _grp["metrics"]),
+                    unsafe_allow_html=True,
+                )
 
 
 def _detect_file_type(content: bytes) -> str:
