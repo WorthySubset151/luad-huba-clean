@@ -1378,129 +1378,15 @@ def render_upload(state: dict) -> None:
         st.info(f"Brakuje: {', '.join(missing)}. Wgraj pozostałe pliki, by odblokować Parsowanie.")
 
 
-DATA_ROOT = PROJECT_ROOT / "data"
-
-
-def _is_within_data(path: Path) -> bool:
-    """Twarda gwarancja bezpieczeństwa: czy ścieżka leży wewnątrz katalogu data/.
-
-    Chroni operacje kasowania - nigdy nie pozwala usunąć czegokolwiek poza
-    PROJECT_ROOT/data, nawet przy błędzie w konfiguracji ścieżek (neutralizuje
-    też próby ucieczki przez "..").
-    """
-    try:
-        resolved = path.resolve()
-        data_resolved = DATA_ROOT.resolve()
-        return resolved == data_resolved or data_resolved in resolved.parents
-    except Exception:
-        return False
-
-
-def _iter_scope_files(path: Path, mode: str) -> list[Path]:
-    """Listuje pliki w zakresie, z filtrem plików ukrytych (np. .gitkeep).
-
-    mode='shallow' - tylko pliki bezpośrednio w katalogu (bez podkatalogów);
-    używane dla 'Metadane kohorty' (data/raw bez uploaded_star).
-    mode='recursive' - wszystkie pliki rekurencyjnie (cały katalog).
-    """
-    if not path.exists():
-        return []
-    if mode == "shallow":
-        return sorted(f for f in path.iterdir()
-                      if f.is_file() and not f.name.startswith("."))
-    return sorted(f for f in path.rglob("*")
-                  if f.is_file() and not f.name.startswith("."))
-
-
-def _scope_stats(path: Path, mode: str) -> tuple[int, int]:
-    """Zwraca (liczba_plików, łączny_rozmiar_w_bajtach) dla zakresu."""
-    files = _iter_scope_files(path, mode)
-    total = 0
-    for f in files:
-        try:
-            total += f.stat().st_size
-        except Exception:
-            pass
-    return len(files), total
-
-
-def _fmt_size(num_bytes: int) -> str:
-    """Czytelny rozmiar (B/KB/MB/GB)."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} GB"
-
-
-def _delete_scope(path: Path, mode: str,
-                  progress_callback: "Callable[[int, int, str], None] | None" = None
-                  ) -> tuple[int, list[str]]:
-    """Usuwa pliki w zakresie (shallow/recursive), z gwarancją bezpieczeństwa.
-
-    Odmawia działania, jeśli ścieżka nie jest wewnątrz data/. W trybie shallow
-    usuwa tylko pliki bezpośrednio w katalogu (zachowuje podkatalogi, np.
-    uploaded_star przy kasowaniu metadanych). progress_callback (idx, total,
-    nazwa) wywoływany po każdym pliku. Zwraca (liczba_usuniętych, błędy).
-    """
-    if not _is_within_data(path):
-        return 0, [f"ODMOWA: ścieżka {path} poza katalogiem data/ - operacja zablokowana"]
-    files = _iter_scope_files(path, mode)
-    total = len(files)
-    deleted = 0
-    errors = []
-    for idx, f in enumerate(files, start=1):
-        try:
-            f.unlink()
-            deleted += 1
-        except Exception as exc:
-            errors.append(f"{f.name}: {exc}")
-        if progress_callback is not None:
-            progress_callback(idx, total, f.name)
-    return deleted, errors
-
-
-def _build_archive_zip(targets: list[tuple[str, Path, str]],
-                       progress_callback: "Callable[[int, int, str], None] | None" = None
-                       ) -> bytes:
-    """Pakuje wybrane zakresy do archiwum ZIP w pamięci.
-
-    targets: lista (etykieta_w_archiwum, ścieżka, tryb). W trybie shallow pakuje
-    tylko pliki bezpośrednio w katalogu, w recursive zachowuje strukturę względną.
-    progress_callback (idx, total, nazwa) wywoływany po każdym spakowanym pliku.
-    """
-    import io
-    import zipfile
-    # Najpierw zbieramy wszystkie pliki (dla licznika postępu)
-    all_files = []
-    for label, path, mode in targets:
-        for f in _iter_scope_files(path, mode):
-            arcname = f"{label}/{f.name}" if mode == "shallow" else f"{label}/{f.relative_to(path)}"
-            all_files.append((f, arcname))
-
-    total = len(all_files)
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for idx, (f, arcname) in enumerate(all_files, start=1):
-            zf.write(f, arcname)
-            if progress_callback is not None:
-                progress_callback(idx, total, f.name)
-    return buf.getvalue()
-
-
-# Definicje zakresów zarządzania: klucz -> (etykieta, ścieżka, tryb, opis)
-# 'metadata' używa trybu shallow (data/raw BEZ uploaded_star), reszta recursive.
-MANAGE_SCOPES = {
-    "star": ("Pliki STAR-Counts", DATA_UPLOADED_STAR, "recursive",
-             "Surowe pliki ekspresji (data/raw/uploaded_star) — zwykle gigabajty"),
-    "metadata": ("Metadane kohorty", DATA_RAW, "shallow",
-                 "clinical.tsv, sample sheet, metadata.cart.json (bez plików STAR)"),
-    "interim": ("Parquety pośrednie", DATA_INTERIM, "recursive",
-                "Sparsowane pliki STAR (data/interim/star_counts)"),
-    "processed": ("Wyniki finalne", DATA_PROCESSED, "recursive",
-                  "Macierz ekspresji, zbiór przeżywalności, manifesty"),
-}
+from src.manage.data_ops import (  # noqa: E402
+    MANAGE_SCOPES,
+    is_within_data as _is_within_data,
+    iter_scope_files as _iter_scope_files,
+    scope_stats as _scope_stats,
+    fmt_size as _fmt_size,
+    delete_scope as _delete_scope,
+    build_archive_zip as _build_archive_zip,
+)
 
 
 def render_manage(state: dict) -> None:

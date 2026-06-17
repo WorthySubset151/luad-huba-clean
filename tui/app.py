@@ -48,6 +48,9 @@ from src.ingest.gdc_client import (  # noqa: E402
 )
 from src.ingest.cases_client import query_cases, parse_cases_response, CasesClientError  # noqa: E402
 from src.cli_config import resolve_metric, ConfigError  # noqa: E402
+from src.manage.data_ops import (  # noqa: E402
+    MANAGE_SCOPES, scope_stats, fmt_size, delete_scope, build_archive_to_path,
+)
 import yaml  # noqa: E402
 from tui import render  # noqa: E402
 
@@ -71,6 +74,7 @@ MENU = [
     ("7", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
     ("8", "DATASET", "Budowa zbioru przeżywalności (macierz + clinical → parquet)", "dataset"),
     ("9", "DOWNLOAD", "Pobieranie z GDC API (metadane + pliki STAR + clinical)", "download"),
+    ("10", "ZARZĄDZANIE", "Archiwizacja ZIP + bezpieczne kasowanie danych (z potwierdzeniem)", "manage"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -751,6 +755,202 @@ class GDCDownloadScreen(Screen):
             Text(f"Błąd GDC:\n  {msg}", style=render.RISK))
 
 
+class ManageScreen(Screen):
+    """Zarządzanie danymi: archiwizacja ZIP (PF4) i bezpieczne kasowanie (PF5, z potwierdzeniem USUŃ)."""
+
+    PANEL_ID = "LUADHUB.MNG"
+    TITLE_TXT = "ZARZĄDZANIE — ARCHIWIZACJA I KASOWANIE"
+    BINDINGS = [
+        Binding("f4", "archive", "PF4 Archiwizuj"),
+        Binding("f5", "delete", "PF5 Skasuj"),
+        Binding("f6", "refresh", "PF6 Odśwież"),
+        Binding("f3,escape", "app.pop_screen", "PF3 Koniec"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield PanelHeader(self.PANEL_ID, self.TITLE_TXT)
+        with Vertical(id="mng-wrap"):
+            yield Static(self._intro(), id="mng-intro")
+            yield Static(id="mng-stats")
+            with Horizontal(classes="gdc-row"):
+                yield Label("Zakresy        ===> ", classes="gdc-lab")
+                yield Input(value="all", id="mng-scopes",
+                            placeholder="star,metadata,interim,processed lub all")
+            with Horizontal(classes="gdc-row"):
+                yield Label("Potwierdź USUŃ ===> ", classes="gdc-lab")
+                yield Input(id="mng-confirm", placeholder="wpisz USUŃ aby odblokować PF5")
+            yield ProgressBar(id="mng-progress", show_eta=False)
+            yield Static(id="mng-status")
+        yield Footer()
+
+    def _intro(self):
+        return Text.assemble(
+            ("Backup i czyszczenie danych pipeline'u. Cztery kategorie — STAR (gigabajty) "
+             "osobno od lekkich metadanych.\n", render.HEAD),
+            ("PF4 pakuje wybrane zakresy do ZIP (backups/). PF5 kasuje TRWALE — dopiero po wpisaniu USUŃ.\n",
+             render.DIM),
+            ("Kasowanie działa wyłącznie wewnątrz data/ (twardy guard bezpieczeństwa).", render.WARN),
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#mng-progress", ProgressBar).display = False
+        self._refresh_stats()
+        self.query_one("#mng-scopes", Input).focus()
+
+    # --- statystyki zakresów ---
+    def _refresh_stats(self) -> None:
+        body = Text()
+        body.append("Stan danych (klucz · kategoria · pliki · rozmiar):\n", style=render.HEAD)
+        for key, (label, path, mode, _desc) in MANAGE_SCOPES.items():
+            n, b = scope_stats(path, mode)
+            style = render.DIM if n == 0 else render.GREEN
+            body.append(f"  {key:<10}{label:<24}{n:>5} plików{fmt_size(b):>12}\n", style=style)
+        self.query_one("#mng-stats", Static).update(body)
+
+    def action_refresh(self) -> None:
+        if self._busy:
+            return
+        self._refresh_stats()
+        self.query_one("#mng-status", Static).update(
+            Text("Odświeżono stan danych.", style=render.DIM))
+
+    # --- parsowanie wyboru zakresów ---
+    def _parse_scopes(self) -> list[str]:
+        raw = self.query_one("#mng-scopes", Input).value.strip().lower()
+        if raw in ("", "all", "*"):
+            return list(MANAGE_SCOPES.keys())
+        keys = [k.strip() for k in raw.replace(";", ",").split(",") if k.strip()]
+        return [k for k in keys if k in MANAGE_SCOPES]
+
+    def _selected_total(self, keys: list[str]) -> int:
+        return sum(scope_stats(MANAGE_SCOPES[k][1], MANAGE_SCOPES[k][2])[0] for k in keys)
+
+    def _warn_scopes(self) -> None:
+        self.app.bell()
+        self.query_one("#mng-status", Static).update(
+            Text("Brak poprawnych zakresów. Użyj: star, metadata, interim, processed lub all.",
+                 style=render.WARN))
+
+    # --- PF4: archiwizacja ---
+    def action_archive(self) -> None:
+        if self._busy:
+            return
+        keys = self._parse_scopes()
+        if not keys:
+            self._warn_scopes()
+            return
+        n_total = self._selected_total(keys)
+        if n_total == 0:
+            self.query_one("#mng-status", Static).update(
+                Text("Wybrane zakresy są puste — nie ma czego archiwizować.", style=render.DIM))
+            return
+        self._busy = True
+        pbar = self.query_one("#mng-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=n_total, progress=0)
+        self.query_one("#mng-status", Static).update(
+            Text(f"Pakowanie {n_total} plików z: {', '.join(keys)}…", style=render.GREEN))
+        self._archive_worker(keys, n_total)
+
+    @work(thread=True, exclusive=True)
+    def _archive_worker(self, keys, n_total) -> None:
+        try:
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = PROJECT_ROOT / "backups" / f"luad-huba-backup_{ts}.zip"
+            targets = [(MANAGE_SCOPES[k][0].replace(" ", "_"),
+                        MANAGE_SCOPES[k][1], MANAGE_SCOPES[k][2]) for k in keys]
+
+            def on_progress(idx, total, name):
+                self.app.call_from_thread(self._tick, idx, total, name)
+
+            count, size = build_archive_to_path(targets, out_path, progress_callback=on_progress)
+            self.app.call_from_thread(self._archive_done, out_path, count, size)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(self._fail, f"{type(exc).__name__}: {exc}")
+
+    def _archive_done(self, out_path, count, size) -> None:
+        self._busy = False
+        self.query_one("#mng-progress", ProgressBar).display = False
+        rel = out_path.relative_to(PROJECT_ROOT)
+        self.query_one("#mng-status", Static).update(Text(
+            f"✓ Zarchiwizowano {count} plików ({fmt_size(size)})\n→ {rel}", style=render.GREEN))
+
+    # --- PF5: kasowanie (wymaga potwierdzenia USUŃ) ---
+    def action_delete(self) -> None:
+        if self._busy:
+            return
+        keys = self._parse_scopes()
+        if not keys:
+            self._warn_scopes()
+            return
+        confirm = self.query_one("#mng-confirm", Input).value.strip().upper()
+        if confirm != "USUŃ":
+            self.app.bell()
+            self.query_one("#mng-status", Static).update(Text.assemble(
+                ("KASOWANIE ZABLOKOWANE. ", render.RISK),
+                (f"Wpisz USUŃ w polu potwierdzenia, aby trwale skasować: {', '.join(keys)}.",
+                 render.WARN)))
+            return
+        n_total = self._selected_total(keys)
+        if n_total == 0:
+            self.query_one("#mng-status", Static).update(
+                Text("Wybrane zakresy są już puste — nie ma czego kasować.", style=render.DIM))
+            return
+        self._busy = True
+        pbar = self.query_one("#mng-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=n_total, progress=0)
+        self.query_one("#mng-status", Static).update(
+            Text(f"Kasowanie {n_total} plików z: {', '.join(keys)}…", style=render.RISK))
+        self._delete_worker(keys, n_total)
+
+    @work(thread=True, exclusive=True)
+    def _delete_worker(self, keys, n_total) -> None:
+        msgs = []
+        done = {"n": 0}
+        try:
+            for k in keys:
+                label, path, mode, _ = MANAGE_SCOPES[k]
+
+                def on_progress(idx, total, name, _label=label):
+                    done["n"] += 1
+                    self.app.call_from_thread(self._tick, done["n"], n_total, f"{_label}: {name}")
+
+                deleted, errors = delete_scope(path, mode, progress_callback=on_progress)
+                msgs.append(f"{label}: usunięto {deleted}")
+                for e in errors:
+                    msgs.append(f"  ⚠ {e}")
+            self.app.call_from_thread(self._delete_done, msgs)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(
+                self._fail, f"{type(exc).__name__}: {exc}\n  " + " · ".join(msgs))
+
+    def _delete_done(self, msgs) -> None:
+        self._busy = False
+        self.query_one("#mng-progress", ProgressBar).display = False
+        self.query_one("#mng-confirm", Input).value = ""
+        self._refresh_stats()
+        self.query_one("#mng-status", Static).update(
+            Text("✓ Kasowanie zakończone:\n  " + "\n  ".join(msgs), style=render.GREEN))
+
+    # --- wspólne ---
+    def _tick(self, idx, total, name) -> None:
+        self.query_one("#mng-progress", ProgressBar).update(total=total, progress=idx)
+        self.query_one("#mng-status", Static).update(
+            Text(f"{idx}/{total}: {name}", style=render.DIM))
+
+    def _fail(self, msg: str) -> None:
+        self._busy = False
+        self.query_one("#mng-progress", ProgressBar).display = False
+        self.query_one("#mng-status", Static).update(
+            Text(f"Błąd zarządzania:\n  {msg}", style=render.RISK))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -811,6 +1011,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(BuildSurvivalScreen())
         elif action == "download":
             self.app.push_screen(GDCDownloadScreen())
+        elif action == "manage":
+            self.app.push_screen(ManageScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
