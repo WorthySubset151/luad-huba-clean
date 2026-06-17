@@ -64,17 +64,17 @@ VERSION = "v0.1"
 
 # (kod opcji, nazwa, opis, akcja)
 MENU = [
-    ("0", "STATUS", "Przegląd kohorty (próbki, zdarzenia, geny, stadia)", "status"),
-    ("1", "SURVIVAL", "Analiza przeżywalności (Kaplan-Meier + Cox HR)", "survival"),
-    ("2", "PIPELINE", "Status etapów ETL (zbiory danych, kompletność)", "pipeline"),
-    ("3", "EXPRESSION", "Macierz ekspresji (rozkład, batch TSS, PCA)", "expression"),
-    ("4", "VALIDATE", "Walidacja kohorty (QC — spójność próbek/klinika)", "validate"),
-    ("5", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
-    ("6", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
-    ("7", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
-    ("8", "DATASET", "Budowa zbioru przeżywalności (macierz + clinical → parquet)", "dataset"),
-    ("9", "DOWNLOAD", "Pobieranie z GDC API (metadane + pliki STAR + clinical)", "download"),
-    ("10", "ZARZĄDZANIE", "Archiwizacja ZIP + bezpieczne kasowanie danych (z potwierdzeniem)", "manage"),
+    ("1", "DOWNLOAD", "Pobieranie z GDC API (metadane + pliki STAR + clinical)", "download"),
+    ("2", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
+    ("3", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
+    ("4", "DATASET", "Budowa zbioru przeżywalności (macierz + clinical → parquet)", "dataset"),
+    ("5", "PIPELINE", "Status etapów ETL (zbiory danych, kompletność)", "pipeline"),
+    ("6", "VALIDATE", "Walidacja kohorty (QC — spójność próbek/klinika)", "validate"),
+    ("7", "STATUS", "Przegląd kohorty (próbki, zdarzenia, geny, stadia)", "status"),
+    ("8", "EXPRESSION", "Macierz ekspresji (rozkład, batch TSS, PCA)", "expression"),
+    ("9", "SURVIVAL", "Analiza przeżywalności (Kaplan-Meier + Cox HR + rygor stat.)", "survival"),
+    ("10", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
+    ("11", "ZARZĄDZANIE", "Archiwizacja ZIP + bezpieczne kasowanie danych (z potwierdzeniem)", "manage"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
