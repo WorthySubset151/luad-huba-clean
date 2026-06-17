@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import polars as pl  # noqa: E402
+from rich.console import Group  # noqa: E402
 from rich.table import Table  # noqa: E402
 from rich.text import Text  # noqa: E402
 from textual import work  # noqa: E402
@@ -40,6 +41,8 @@ from src.ingest.sample_sheet_parser import parse_sample_sheet  # noqa: E402
 from src.ingest.clinical_parser import parse_clinical  # noqa: E402
 from src.ingest.star_parser import parse_star_counts, StarParserError  # noqa: E402
 from src.ingest.file_naming import STAR_FILE_PATTERNS, extract_star_file_stem  # noqa: E402
+from src.transform.expression_matrix import build_expression_matrix  # noqa: E402
+from src.cli_config import resolve_metric, ConfigError  # noqa: E402
 import yaml  # noqa: E402
 from tui import render  # noqa: E402
 
@@ -60,6 +63,7 @@ MENU = [
     ("4", "VALIDATE", "Walidacja kohorty (QC — spójność próbek/klinika)", "validate"),
     ("5", "CONFIG", "Konfiguracja pipeline'u (podgląd configs/default.yaml)", "config"),
     ("6", "INGEST", "Parsowanie STAR-Counts po ścieżce → data/interim", "ingest"),
+    ("7", "MATRIX", "Budowa macierzy ekspresji (interim → expression_matrix)", "matrix"),
     ("X", "KONIEC", "Wyjście z programu", "exit"),
 ]
 _ACTION_BY_CODE = {code: action for code, _name, _desc, action in MENU}
@@ -353,6 +357,124 @@ class IngestScreen(Screen):
                 style=render.GREEN))
 
 
+class BuildMatrixScreen(Screen):
+    """Budowa macierzy ekspresji: interim parquety → expression_matrix.parquet (worker)."""
+
+    PANEL_ID = "LUADHUB.MTRX"
+    TITLE_TXT = "BUILD MATRIX — MACIERZ EKSPRESJI"
+    BINDINGS = [
+        Binding("f4", "build", "PF4 Buduj"),
+        Binding("f3,escape", "app.pop_screen", "PF3 Koniec"),
+    ]
+    METRIC = "tpm"            # domyślnie jak w GUI (selectbox index 0)
+    DUP_STRATEGY = "deepest"  # zalecane dla TCGA
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield PanelHeader(self.PANEL_ID, self.TITLE_TXT)
+        with Vertical(id="mtrx-wrap"):
+            yield Static(id="mtrx-plan")
+            yield ProgressBar(id="mtrx-progress", show_eta=False)
+            yield Static(id="mtrx-status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#mtrx-progress", ProgressBar).display = False
+        self._render_plan()
+
+    def _gather(self):
+        parquets = sorted(DATA_INTERIM.glob("*.parquet"))
+        sheet = _find_sample_sheet()
+        cfgdata = _read_config()
+        cfg = cfgdata.get("cfg", {}) if "cfg" in cfgdata else {}
+        biotype = (cfg.get("normalization", {}) or {}).get("biotype_filter", "protein_coding")
+        return parquets, sheet, biotype
+
+    def _render_plan(self) -> None:
+        parquets, sheet, biotype = self._gather()
+        t = Table(box=render._BOX, border_style=render.DIM, show_header=False)
+        t.add_column(style=render.DIM)
+        t.add_column(style=render.GREEN, justify="right")
+        t.add_row("Parquetów do połączenia", str(len(parquets)))
+        t.add_row("Metryka", self.METRIC)
+        t.add_row("Strategia duplikatów", self.DUP_STRATEGY)
+        t.add_row("Filtr biotype", biotype if biotype else "(brak — wszystkie geny)")
+        t.add_row("Wyjście", "data/processed/expression_matrix.parquet")
+        head = Text("Interim parquety → macierz geny × próbki (filtr biotype, deduplikacja)",
+                    style=render.HEAD)
+        self.query_one("#mtrx-plan", Static).update(Group(head, Text(""), t))
+
+        status = self.query_one("#mtrx-status", Static)
+        problems = []
+        if not parquets:
+            problems.append(f"brak parquetów w {DATA_INTERIM} — najpierw INGEST/Parsowanie")
+        if sheet is None:
+            problems.append(f"brak sample sheet (gdc_sample_sheet*.tsv) w {DATA_RAW}")
+        if problems:
+            status.update(Text("BRAK DANYCH:\n  - " + "\n  - ".join(problems), style=render.RISK))
+        else:
+            status.update(Text("Gotowe. Naciśnij PF4 aby zbudować macierz.", style=render.GREEN))
+
+    def action_build(self) -> None:
+        if self._busy:
+            return
+        parquets, sheet, biotype = self._gather()
+        if not parquets or sheet is None:
+            self._render_plan()
+            return
+        self._busy = True
+        pbar = self.query_one("#mtrx-progress", ProgressBar)
+        pbar.display = True
+        pbar.update(total=len(parquets), progress=0)
+        self.query_one("#mtrx-status", Static).update(
+            Text(f"Budowanie macierzy z {len(parquets)} parquetów…", style=render.GREEN))
+        self._build_worker(parquets, sheet, biotype)
+
+    @work(thread=True, exclusive=True)
+    def _build_worker(self, parquets, sheet, biotype) -> None:
+        try:
+            sheet_df = parse_sample_sheet(sheet)
+            metric_resolved = resolve_metric(self.METRIC)
+        except (ConfigError, OSError, ValueError) as exc:
+            self.app.call_from_thread(self._fail, f"Przygotowanie: {exc}")
+            return
+
+        def cb(done: int, total: int) -> None:
+            self.app.call_from_thread(self._tick, done, total)
+
+        try:
+            matrix = build_expression_matrix(
+                parquets, sheet_df, metric=metric_resolved,
+                duplicate_strategy=self.DUP_STRATEGY,
+                biotype_filter=biotype if (biotype and biotype.strip()) else None,
+                progress_callback=cb,
+            )
+            DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
+            matrix.write_parquet(DATA_PROCESSED / "expression_matrix.parquet")
+            self.app.call_from_thread(self._done, matrix.height, matrix.width - 1)
+        except Exception as exc:  # noqa: BLE001
+            self.app.call_from_thread(self._fail, f"{type(exc).__name__}: {exc}")
+
+    def _tick(self, done: int, total: int) -> None:
+        self.query_one("#mtrx-progress", ProgressBar).update(total=total, progress=done)
+        self.query_one("#mtrx-status", Static).update(
+            Text(f"Połączono {done}/{total} próbek…", style=render.DIM))
+
+    def _done(self, n_genes: int, n_samples: int) -> None:
+        self._busy = False
+        self.query_one("#mtrx-status", Static).update(Text(
+            f"✓ Macierz: {n_genes} genów × {n_samples} próbek "
+            "→ data/processed/expression_matrix.parquet", style=render.GREEN))
+
+    def _fail(self, msg: str) -> None:
+        self._busy = False
+        self.query_one("#mtrx-status", Static).update(
+            Text(f"Błąd budowy macierzy:\n  {msg}", style=render.RISK))
+
+
 class PrimaryMenu(Screen):
     """Menu główne w stylu ISPF (primary option menu)."""
 
@@ -407,6 +529,8 @@ class PrimaryMenu(Screen):
             self.app.push_screen(ConfigScreen())
         elif action == "ingest":
             self.app.push_screen(IngestScreen())
+        elif action == "matrix":
+            self.app.push_screen(BuildMatrixScreen())
         else:
             self.app.bell()
             self.notify(f"Nieznana opcja: {code!r}", severity="warning", title="LUADHUB")
