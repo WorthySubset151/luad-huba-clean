@@ -730,7 +730,7 @@ def render_dashboard(state: dict) -> None:
     with tab_surv:
         st.subheader("Kaplan-Meier — cała kohorta")
         try:
-            fig, stats = viz.km_overall(pdf)
+            fig, stats = viz.km_overall(ds)
             st.plotly_chart(fig, use_container_width=True)
             if stats["median_os"]:
                 cols = st.columns(4)
@@ -746,7 +746,7 @@ def render_dashboard(state: dict) -> None:
         st.subheader("Kaplan-Meier — per stadium")
         st.caption("Stadium zaawansowania jako najsilniejszy predyktor kliniczny.")
         try:
-            fig, info = viz.km_per_stage(pdf)
+            fig, info = viz.km_per_stage(ds)
             st.plotly_chart(fig, use_container_width=True)
             if info["p_value"] is not None:
                 sig = "istotne" if info["p_value"] < 0.05 else "nieistotne"

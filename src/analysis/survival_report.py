@@ -121,31 +121,50 @@ def cohort_summary(ds: pl.DataFrame) -> dict:
     }
 
 
-def km_summary(ds: pl.DataFrame) -> dict:
-    """Kaplan-Meier: mediana OS, przeżycie 1/3/5-letnie, log-rank per stadium."""
-    pdf = _encode_clinical(ds.to_pandas())
+def _km_fit(time_years, event) -> tuple[dict, dict]:
+    """Dopasowuje KM raz; zwraca (statystyki, krzywą z CI) z tego samego fitu."""
     kmf = KaplanMeierFitter()
-    kmf.fit(pdf["time_years"], pdf["event"])
+    kmf.fit(time_years, event)
+    sf = kmf.survival_function_
+    ci = kmf.confidence_interval_
+    curve = {
+        "timeline": [float(x) for x in sf.index.values],
+        "surv": [float(x) for x in sf.iloc[:, 0].values],
+        "ci_lower": [float(x) for x in ci.iloc[:, 0].values],
+        "ci_upper": [float(x) for x in ci.iloc[:, 1].values],
+    }
     median = kmf.median_survival_time_
-    out = {"median_os": float(median) if not np.isnan(median) else None}
+    stats = {"median_os": float(median) if not np.isnan(median) else None}
     for y in (1, 3, 5):
         try:
-            out[f"surv_{y}y"] = float(kmf.survival_function_at_times(y).iloc[0])
+            stats[f"surv_{y}y"] = float(kmf.survival_function_at_times(y).iloc[0])
         except Exception:
-            out[f"surv_{y}y"] = None
+            stats[f"surv_{y}y"] = None
+    return stats, curve
+
+
+def km_report(ds: pl.DataFrame) -> dict:
+    """Pełny raport KM: statystyki + punkty krzywych (z CI) + log-rank.
+
+    Jedno źródło dopasowań KM dla overall i per-stadium — GUI rysuje z tego
+    krzywe (Plotly), terminal czyta podsumowanie przez km_summary. Zwraca:
+    {overall: {stats, curve}, per_stage: [{stage, n, median_os, curve}],
+    logrank_p, stages_present}.
+    """
+    pdf = _encode_clinical(ds.to_pandas())
+    overall_stats, overall_curve = _km_fit(pdf["time_years"], pdf["event"])
 
     per_stage = []
     for s in MAIN_STAGES:
         mask = pdf["stage_group"] == s
         if mask.sum() < 2:
             continue
-        k = KaplanMeierFitter()
-        k.fit(pdf.loc[mask, "time_years"], pdf.loc[mask, "event"])
-        m = k.median_survival_time_
+        st_stats, st_curve = _km_fit(pdf.loc[mask, "time_years"], pdf.loc[mask, "event"])
         per_stage.append({
             "stage": s,
             "n": int(mask.sum()),
-            "median_os": float(m) if not np.isnan(m) else None,
+            "median_os": st_stats["median_os"],
+            "curve": st_curve,
         })
 
     logrank_p = None
@@ -161,8 +180,27 @@ def km_summary(ds: pl.DataFrame) -> dict:
         except Exception:
             logrank_p = None
 
-    out["per_stage"] = per_stage
-    out["logrank_p"] = logrank_p
+    return {
+        "overall": {"stats": overall_stats, "curve": overall_curve},
+        "per_stage": per_stage,
+        "logrank_p": logrank_p,
+        "stages_present": [p["stage"] for p in per_stage],
+    }
+
+
+def km_summary(ds: pl.DataFrame) -> dict:
+    """Podsumowanie KM (widok km_report) — kontrakt dla terminala.
+
+    {median_os, surv_1y/3y/5y, per_stage[{stage,n,median_os}], logrank_p}.
+    Liczby pochodzą z tego samego dopasowania co krzywe w GUI (km_report).
+    """
+    rep = km_report(ds)
+    out = dict(rep["overall"]["stats"])
+    out["per_stage"] = [
+        {"stage": p["stage"], "n": p["n"], "median_os": p["median_os"]}
+        for p in rep["per_stage"]
+    ]
+    out["logrank_p"] = rep["logrank_p"]
     return out
 
 

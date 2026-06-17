@@ -14,7 +14,7 @@ from lifelines.statistics import logrank_test
 
 # Rdzeń analityczny (jedno źródło prawdy metodologii Cox/KM oraz danych panelu).
 from src.analysis import survival_report as sr
-from src.analysis.survival_report import SIGNATURE_PANEL, collapse_stage, find_gene_col
+from src.analysis.survival_report import SIGNATURE_PANEL, find_gene_col
 
 # Paleta spójna z notebookami (beż/brąz/zieleń)
 PALETTE = {
@@ -150,28 +150,50 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _km_curve_trace(curve, label, color, n=None, dash=None):
+    """Ślady KM (CI + krzywa schodkowa) z gotowych tablic z sr.km_report.
+
+    Odpowiednik _km_trace, ale bez dopasowywania KM — punkty przychodzą z
+    jednego źródła (src/analysis), więc krzywa w GUI i liczby w terminalu nie
+    mogą się rozjechać. _km_trace zostaje dla paneli gen-owych (tylko GUI).
+    """
+    times = np.asarray(curve["timeline"], dtype=float)
+    surv = np.asarray(curve["surv"], dtype=float)
+    lower = np.asarray(curve["ci_lower"], dtype=float)
+    upper = np.asarray(curve["ci_upper"], dtype=float)
+    fill = (_hex_to_rgba(color, 0.12) if color.startswith("#")
+            else color.replace("rgb", "rgba").replace(")", ",0.12)"))
+    name = f"{label} (n={n})" if n is not None else label
+    return [
+        go.Scatter(
+            x=np.concatenate([times, times[::-1]]),
+            y=np.concatenate([upper, lower[::-1]]),
+            fill="toself", fillcolor=fill,
+            line=dict(width=0), hoverinfo="skip", showlegend=False,
+        ),
+        go.Scatter(
+            x=times, y=surv, mode="lines", name=name,
+            line=dict(color=color, width=2.5, shape="hv", dash=dash),
+            hovertemplate="%{y:.2f}<extra></extra>",
+        ),
+    ]
+
+
 # =====================================================================
 #  WYKRESY PRZEŻYWALNOŚCI
 # =====================================================================
-def km_overall(pdf) -> tuple[go.Figure, dict]:
-    """KM dla całej kohorty + statystyki (mediana OS, przeżycie 1/3/5-letnie)."""
-    pdf = _ensure_time_years(pdf)
+def km_overall(ds) -> tuple[go.Figure, dict]:
+    """KM dla całej kohorty + statystyki. Liczby i krzywa z sr.km_report."""
+    rep = sr.km_report(ds)
+    stats = rep["overall"]["stats"]
+    n = ds.height
     fig = go.Figure()
-    traces, kmf = _km_trace(pdf, np.ones(len(pdf), dtype=bool),
-                            "Cała kohorta", PALETTE["primary"])
-    for t in traces:
+    for t in _km_curve_trace(rep["overall"]["curve"], "Cała kohorta",
+                             PALETTE["primary"], n=n):
         fig.add_trace(t)
 
-    median_os = kmf.median_survival_time_
-    stats = {"median_os": float(median_os) if not np.isnan(median_os) else None}
-    for years in [1, 3, 5]:
-        try:
-            stats[f"surv_{years}y"] = float(kmf.survival_function_at_times(years).iloc[0])
-        except Exception:
-            stats[f"surv_{years}y"] = None
-
-    # Linia mediany
-    if stats["median_os"]:
+    median_os = stats["median_os"]
+    if median_os:
         fig.add_hline(y=0.5, line_dash="dash", line_color=PALETTE["secondary"], opacity=0.4)
         fig.add_vline(x=median_os, line_dash="dash", line_color=PALETTE["secondary"], opacity=0.4)
         fig.add_annotation(x=median_os, y=0.55, text=f"Mediana OS: {median_os:.2f} lat",
@@ -184,42 +206,19 @@ def km_overall(pdf) -> tuple[go.Figure, dict]:
     return fig, stats
 
 
-def km_per_stage(pdf) -> tuple[go.Figure, dict]:
-    """KM rozbite per stadium (collapse do 4 grup) + log-rank."""
-    pdf = _ensure_time_years(pdf)
-    pdf["stage_group"] = pdf["ajcc_pathologic_stage"].apply(collapse_stage)
-
+def km_per_stage(ds) -> tuple[go.Figure, dict]:
+    """KM rozbite per stadium + log-rank. Liczby i krzywe z sr.km_report."""
+    rep = sr.km_report(ds)
     fig = go.Figure()
-    stage_order = ["I", "II", "III", "IV"]
-    present = [s for s in stage_order if (pdf["stage_group"] == s).any()]
-
-    for i, stage in enumerate(present):
-        mask = (pdf["stage_group"] == stage).values
-        if mask.sum() < 2:
-            continue
-        traces, _ = _km_trace(pdf, mask, f"Stage {stage}", PALETTE["stage"][i])
-        for t in traces:
+    for i, p in enumerate(rep["per_stage"]):
+        color = PALETTE["stage"][i] if i < len(PALETTE["stage"]) else PALETTE["primary"]
+        for t in _km_curve_trace(p["curve"], f"Stage {p['stage']}", color, n=p["n"]):
             fig.add_trace(t)
-
-    # Log-rank test (multivariate przez pary - tu uproszczone: I vs IV jako sygnał)
-    from lifelines.statistics import multivariate_logrank_test
-    mask_known = pdf["stage_group"].isin(stage_order).values
-    p_value = None
-    if mask_known.sum() > 10:
-        try:
-            res = multivariate_logrank_test(
-                pdf["time_years"][mask_known],
-                pdf["stage_group"][mask_known],
-                pdf["event"][mask_known],
-            )
-            p_value = float(res.p_value)
-        except Exception:
-            p_value = None
 
     _layout(fig, "Kaplan-Meier per stadium (grupy główne)", "Czas (lata)",
             "Prawdopodobieństwo przeżycia")
     fig.update_yaxes(range=[0, 1.02])
-    return fig, {"p_value": p_value, "stages": present}
+    return fig, {"p_value": rep["logrank_p"], "stages": rep["stages_present"]}
 
 
 def signature_score(ds, pdf) -> np.ndarray:
