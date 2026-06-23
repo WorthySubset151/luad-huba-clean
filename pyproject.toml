@@ -24,6 +24,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "seaborn>=0.13.2",
     "textual>=0.60",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]
