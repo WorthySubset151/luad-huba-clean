@@ -27,6 +27,7 @@ analitycznym oraz zestaw notebooków dokumentujących każdy etap przetwarzania.
 - [Notebooki](#notebooki)
 - [Struktura katalogów](#struktura-katalogów)
 - [Wyjście pipeline'u](#wyjście-pipelineu)
+- [Testy](#testy)
 - [Wymagania](#wymagania)
 
 ## Opis
@@ -218,7 +219,10 @@ deduplikacja do 1 próbki/pacjenta, podział train/test grupowany po pacjencie
 standaryzacja fitowane **wyłącznie na train** (bez wycieku do testu), log2(x+1) i
 odrzucenie genów o zerowej wariancji. Wynik (`X_train`/`X_test`, `y_train`/`y_test`,
 lista wybranych genów, `manifest.json` z pełną dokumentacją kroków i rekomendowanymi
-ustawieniami modelu) pobiera się z GUI jako archiwum ZIP.
+ustawieniami modelu) pobiera się z GUI jako archiwum ZIP. Tabele zapisywane są
+domyślnie w **Parquet** — zachowuje typy kolumn i wartości brakujące, czyta się
+kilkukrotnie szybciej niż CSV i przy typowych rozmiarach daje mniejsze pliki;
+formatem alternatywnym jest CSV (do otwarcia w arkuszu).
 
 ### Zarządzanie danymi
 
@@ -399,8 +403,9 @@ deduplikacja do 1 próbki/pacjenta (deepest), podział train/test **grupowany po
 pacjencie** ze stratyfikacją po zdarzeniu, selekcja cech (top-K wg wariancji) i
 standaryzacja **fitowane wyłącznie na train** (dyscyplina braku wycieku), log2(x+1),
 odrzucenie zerowej wariancji. Zwraca `X_train`/`X_test`, `y_train`/`y_test`, listę
-genów i manifest; `build_ml_bundle(result)` pakuje całość (z `manifest.json` i README)
-w archiwum ZIP.
+genów i manifest; `build_ml_bundle(result, fmt="parquet")` pakuje całość (z
+`manifest.json` i README) w archiwum ZIP — `fmt` przyjmuje `parquet` (domyślnie)
+albo `csv`, a użyty format trafia do manifestu.
 
 ### `src/manage/` — zarządzanie danymi
 
@@ -563,6 +568,7 @@ luad-huba-clean/
 ├── app/
 │   ├── main.py       # interfejs Streamlit (10 sekcji)
 │   └── dashboard_viz.py  # wizualizacje Plotly (delegują do src/analysis)
+├── tests/            # pytest: rdzeń pipeline'u, nacisk na brak wycieku
 ├── notebooks/        # 7 notebooków - sanity checks, EDA, survival
 ├── configs/          # YAML (default, filters)
 ├── logs/qc/          # raporty walidacji
@@ -581,6 +587,40 @@ luad-huba-clean/
 | `data/processed/survival_dataset.parquet` | Zbiór przeżywalności (próbki × geny + clinical) |
 | `logs/qc/qc_report_<UTC>.json` | Raport QC kohorty |
 
+## Testy
+
+Repozytorium ma zestaw testów `pytest` obejmujący rdzeń pipeline'u — od parsera
+klinicznego po eksport zbioru pod ML.
+
+```bash
+uv run pytest              # całość
+uv run pytest -v           # z nazwami testów
+uv run pytest tests/test_ml_export.py   # pojedynczy moduł
+```
+
+Testy są **samowystarczalne**: dane wejściowe (klinika w formacie eksportu „cart"
+GDC, macierz ekspresji, sample sheet) generowane są syntetycznie w `tests/conftest.py`,
+więc uruchamiają się na świeżym klonie bez pobierania kohorty i bez plików w `data/`.
+
+Co jest pokryte:
+
+| Plik | Zakres |
+|---|---|
+| `test_clinical_parser.py` | filtrowanie diagnoz podstawowych, wyliczanie `time`/`event`, markery braków GDC |
+| `test_survival_dataset.py` | integracja ekspresji z kliniką, kolejność kolumn, strażnik kompletności kowariantów |
+| `test_readiness_report.py` | mapowanie metryki normalizacji, kompletność per pole, odporność PCA, η², werdykt |
+| `test_ml_export.py` | **brak wycieku**, fit wyłącznie na train, deduplikacja, determinizm, format archiwum |
+| `test_repair_clinical.py` | naprawa kowariantów bez ruszania etykiet i genów |
+| `test_smoke.py` | składnia, importy, rejestracja komend CLI, higiena pakietu |
+
+**Nacisk na brak wycieku.** Błąd w tym miejscu nie wywala się głośno — po cichu
+zawyża wyniki modelu, więc jedyną obroną jest asercja. Testy sprawdzają rozłączność
+pacjentów między train i test (również przy wyłączonej deduplikacji, gdy grupowanie
+jest jedynym zabezpieczeniem) oraz to, że selekcja cech i standaryzacja nie zaglądają
+do zbioru testowego: zmiana wartości wyłącznie w teście nie może zmienić macierzy
+treningowej. Asercje standaryzacji są liczone **per gen** — globalna średnia po całej
+macierzy wychodzi bliska zeru nawet przy wycieku, więc przepuszczałaby błąd.
+
 ## Wymagania
 
 - Python 3.12+
@@ -592,7 +632,9 @@ Kluczowe zależności: `polars` (przetwarzanie danych), `typer` (CLI),
 `streamlit` (GUI), `httpx` + `tenacity`
 (współbieżny klient GDC z ponawianiem), `plotly` (wizualizacje), `lifelines`
 i `scikit-survival` (analiza przeżywalności), `scipy` (statystyka: FDR,
-Schoenfeld), `pandas` + `pyarrow` (parquet, eksport CSV/ZIP).
+Schoenfeld), `pandas` + `pyarrow` (parquet — magazyn danych i eksport zbiorów ML).
+Zależności deweloperskie (`pip install -e ".[dev]"`): `pytest` (testy), `ruff`,
+`black`.
 
 
 ## Przewodnik po dashboardzie analitycznym

@@ -1292,9 +1292,13 @@ def render_dashboard(state: dict) -> None:
         )
         _testf = _c2.slider("Frakcja testu", 0.10, 0.40, 0.20, 0.05)
         _seed = _c3.number_input("Seed", min_value=0, max_value=99999, value=42, step=1)
-        _c4, _c5 = st.columns(2)
+        _c4, _c5, _c6 = st.columns(3)
         _dedup = _c4.checkbox("Deduplikuj do 1 próbki/pacjenta", value=True)
         _stdz = _c5.checkbox("Standaryzuj (z-score, fit na train)", value=True)
+        _fmt = _c6.selectbox(
+            "Format tabel", options=ml_export.EXPORT_FORMATS, index=0,
+            help="Parquet zachowuje typy kolumn i czyta się szybciej; CSV otworzysz w arkuszu.",
+        )
         if st.button("Przygotuj zbiór ML", type="primary"):
             with st.spinner("Buduję zbiór gotowy pod ML…"):
                 try:
@@ -1302,9 +1306,8 @@ def render_dashboard(state: dict) -> None:
                         ds, top_k=int(_topk), test_frac=float(_testf), seed=int(_seed),
                         dedup=bool(_dedup), standardize=bool(_stdz),
                     )
-                    st.session_state["_ml_export"] = (
-                        ml_export.build_ml_bundle(_res), _res["manifest"],
-                    )
+                    _bundle = ml_export.build_ml_bundle(_res, fmt=str(_fmt))
+                    st.session_state["_ml_export"] = (_bundle, _res["manifest"])
                 except Exception as exc:  # noqa: BLE001
                     st.session_state.pop("_ml_export", None)
                     st.error(f"Nie udało się przygotować zbioru: {exc}")

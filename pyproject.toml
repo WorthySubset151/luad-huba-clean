@@ -34,8 +34,11 @@ dev = [
 
 [project.scripts]
 luad-huba = "src.cli:app"
-luad-huba-tui = "tui.app:main"
-ingest-sample-sheet = "src.ingest.sample_sheet_ingestion:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
 
 [tool.ruff]
 line-length = 100

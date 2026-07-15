@@ -31,18 +31,32 @@ _Y_CANDIDATES = (
     "age_at_index", "gender", "ajcc_pathologic_stage",
 )
 
-_README = (
-    "Zbiór gotowy pod uczenie maszynowe (LUAD-HUBA)\n"
-    "===============================================\n\n"
-    "Pliki:\n"
-    "  X_train.csv / X_test.csv   – cechy (sample_id + wybrane geny) po transformacjach.\n"
-    "  y_train.csv / y_test.csv   – etykiety (sample_id, case_id, time, event, klinika).\n"
-    "  selected_genes.txt         – lista wybranych genów (kolejność kolumn cech).\n"
-    "  manifest.json              – pełna dokumentacja przygotowania + rekomendacje modelu.\n\n"
-    "Kluczowe: podział train/test jest grupowany po pacjencie (case_id), a selekcja\n"
-    "cech i standaryzacja fitowane WYŁĄCZNIE na train — test jest nietknięty do oceny.\n"
-    "Do walidacji krzyżowej używaj GroupKFold po case_id. Szczegóły w manifest.json.\n"
-)
+EXPORT_FORMATS: tuple[str, ...] = ("parquet", "csv")
+DEFAULT_EXPORT_FORMAT = "parquet"
+
+
+def _readme_text(ext: str) -> str:
+    """Treść README dołączanego do archiwum, dopasowana do formatu tabel."""
+    note = (
+        "Format tabel: Parquet — typy kolumn i wartości brakujące zachowane wiernie,\n"
+        "odczyt kilkukrotnie szybszy niż z CSV, a pliki przy typowych rozmiarach mniejsze\n"
+        "(pandas.read_parquet / polars.read_parquet).\n"
+        if ext == "parquet"
+        else "Format tabel: CSV — uniwersalny, ale typy kolumn odtwarzane przy wczytaniu.\n"
+    )
+    return (
+        "Zbiór gotowy pod uczenie maszynowe (LUAD-HUBA)\n"
+        "===============================================\n\n"
+        "Pliki:\n"
+        f"  X_train.{ext} / X_test.{ext}   – cechy (sample_id + wybrane geny) po transformacjach.\n"
+        f"  y_train.{ext} / y_test.{ext}   – etykiety (sample_id, case_id, time, event, klinika).\n"
+        "  selected_genes.txt         – lista wybranych genów (kolejność kolumn cech).\n"
+        "  manifest.json              – pełna dokumentacja przygotowania + rekomendacje modelu.\n\n"
+        + note +
+        "\nKluczowe: podział train/test jest grupowany po pacjencie (case_id), a selekcja\n"
+        "cech i standaryzacja fitowane WYŁĄCZNIE na train — test jest nietknięty do oceny.\n"
+        "Do walidacji krzyżowej używaj GroupKFold po case_id. Szczegóły w manifest.json.\n"
+    )
 
 
 def _grouped_stratified_split(case_ids, events, test_frac: float, seed: int):
@@ -175,14 +189,6 @@ def prepare_ml_dataset(ds, top_k: int = 2000, test_frac: float = 0.2, seed: int 
             "Cel przeżyciowy: modele świadome cenzury (Cox / Random Survival Forest / DeepSurv), "
             "nie zwykła regresja.",
         ],
-        "pliki": {
-            "X_train.csv": "cechy treningowe (sample_id + wybrane geny, po transformacjach)",
-            "X_test.csv": "cechy testowe (te same geny, transformacje z train)",
-            "y_train.csv": "etykiety treningowe (sample_id, case_id, time, event, klinika)",
-            "y_test.csv": "etykiety testowe",
-            "selected_genes.txt": "lista wybranych genów (kolejność cech)",
-            "manifest.json": "pełna dokumentacja przygotowania",
-        },
     }
 
     return {
@@ -192,15 +198,44 @@ def prepare_ml_dataset(ds, top_k: int = 2000, test_frac: float = 0.2, seed: int 
     }
 
 
-def build_ml_bundle(result: dict) -> bytes:
-    """Pakuje wynik prepare_ml_dataset w archiwum ZIP (X/y CSV + manifest + README)."""
+def _table_bytes(df, fmt: str) -> bytes:
+    """Serializuje ramkę do bajtów w wybranym formacie."""
+    if fmt == "parquet":
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False)
+        return buf.getvalue()
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def build_ml_bundle(result: dict, fmt: str = DEFAULT_EXPORT_FORMAT) -> bytes:
+    """Pakuje wynik prepare_ml_dataset w archiwum ZIP (X/y + manifest + README).
+
+    ``fmt`` wybiera format tabel: ``parquet`` (domyślny — zachowuje typy kolumn,
+    mniejsze pliki) albo ``csv`` (uniwersalny, do otwarcia w arkuszu).
+
+    Uzupełnia ``result["manifest"]`` o sekcję ``eksport`` (format + spis plików),
+    żeby manifest w archiwum opisywał to, co faktycznie w nim jest.
+    """
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(f"Nieznany format eksportu: {fmt!r} (dozwolone: {EXPORT_FORMATS}).")
+
+    result["manifest"]["eksport"] = {
+        "format_tabel": fmt,
+        "pliki": {
+            f"X_train.{fmt}": "cechy treningowe (sample_id + wybrane geny, po transformacjach)",
+            f"X_test.{fmt}": "cechy testowe (te same geny, transformacje z train)",
+            f"y_train.{fmt}": "etykiety treningowe (sample_id, case_id, time, event, klinika)",
+            f"y_test.{fmt}": "etykiety testowe",
+            "selected_genes.txt": "lista wybranych genów (kolejność cech)",
+            "manifest.json": "pełna dokumentacja przygotowania",
+        },
+    }
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("X_train.csv", result["X_train"].to_csv(index=False))
-        z.writestr("X_test.csv", result["X_test"].to_csv(index=False))
-        z.writestr("y_train.csv", result["y_train"].to_csv(index=False))
-        z.writestr("y_test.csv", result["y_test"].to_csv(index=False))
+        for name in ("X_train", "X_test", "y_train", "y_test"):
+            z.writestr(f"{name}.{fmt}", _table_bytes(result[name], fmt))
         z.writestr("selected_genes.txt", "\n".join(result["selected_genes"]))
         z.writestr("manifest.json", json.dumps(result["manifest"], ensure_ascii=False, indent=2))
-        z.writestr("README.txt", _README)
+        z.writestr("README.txt", _readme_text(fmt))
     return buf.getvalue()
