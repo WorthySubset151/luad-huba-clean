@@ -127,7 +127,18 @@ def cohort_summary(ds: pl.DataFrame, modality: Modality = DEFAULT_MODALITY) -> d
 
 
 def _km_fit(time_years, event) -> tuple[dict, dict]:
-    """Dopasowuje KM raz; zwraca (statystyki, krzywą z CI) z tego samego fitu."""
+    """Dopasowuje KM raz; zwraca (statystyki, krzywą z CI) z tego samego fitu.
+
+    Odporny na grupę zdegenerowaną: gdy po podziale (np. high/low względem mediany
+    genu o niemal stałej ekspresji — ALK w LUAD bywa bliski zeru) jedna grupa jest
+    pusta, zwraca puste statystyki zamiast wywalać lifelines.
+    """
+    time_years = np.asarray(time_years, dtype=float)
+    event = np.asarray(event).astype(int)  # bool/obiekt -> 0/1 wymagane przez lifelines
+    empty_curve = {"timeline": [], "surv": [], "ci_lower": [], "ci_upper": []}
+    empty_stats = {"median_os": None, "surv_1y": None, "surv_3y": None, "surv_5y": None}
+    if time_years.size == 0:
+        return empty_stats, empty_curve
     kmf = KaplanMeierFitter()
     kmf.fit(time_years, event)
     sf = kmf.survival_function_
@@ -215,7 +226,7 @@ def signature_score(ds: pl.DataFrame) -> tuple[np.ndarray, int]:
     Różnicowanie (znak -1) odejmuje, proliferacja/inwazja (znak +1) dodaje —
     wyższy score = profil bardziej agresywny. Zwraca (score, liczba_genów).
     """
-    gene_cols = modality.feature_columns(ds)
+    gene_cols = DEFAULT_MODALITY.feature_columns(ds)
     score = np.zeros(ds.height)
     found = 0
     for _symbol, (ensg, sign) in SIGNATURE_PANEL.items():
@@ -276,7 +287,7 @@ def signature_km_report(ds: pl.DataFrame) -> dict:
 
 def single_gene_km_report(ds: pl.DataFrame, ensg: str, symbol: str) -> dict:
     """KM pojedynczego genu (high/low względem mediany ekspresji) + log-rank."""
-    gene_cols = modality.feature_columns(ds)
+    gene_cols = DEFAULT_MODALITY.feature_columns(ds)
     col = find_gene_col(ensg, gene_cols)
     if col is None:
         return {"error": f"Gen {symbol} ({ensg}) nie znaleziony w macierzy", "symbol": symbol}
@@ -295,7 +306,7 @@ def multi_gene_km_report(ds: pl.DataFrame, genes: list) -> list:
     {symbol, p_value, note, n_high, median_os_high, high_curve} — GUI rysuje
     krzywe high, terminal pokazuje tabelę log-rank.
     """
-    gene_cols = modality.feature_columns(ds)
+    gene_cols = DEFAULT_MODALITY.feature_columns(ds)
     pdf = _encode_clinical(ds.to_pandas())
     results = []
     for symbol, ensg in genes:
@@ -400,7 +411,7 @@ def cox_genes_report(ds: pl.DataFrame) -> dict:
     porównanie C-index było uczciwe (ten sam N). Zwraca rows (geny) + oba
     C-index + delta (wkład genów) + lista pominiętych genów.
     """
-    gene_cols = modality.feature_columns(ds)
+    gene_cols = DEFAULT_MODALITY.feature_columns(ds)
     pdf = _encode_clinical(ds.to_pandas())
 
     feats, missing = [], []

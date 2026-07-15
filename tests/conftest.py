@@ -93,13 +93,26 @@ def expression_inputs(clinical):
     samples = [f"{c}-01A" for c in cases] + [f"{c}-02A" for c in cases[:n_dup]]
 
     genes = [f"ENSG{i:011d}" for i in range(N_GENES)]
+    # Kilka pierwszych kolumn dostaje realne identyfikatory panelu LUAD (sygnatura
+    # 7-genowa + markery), żeby funkcje panelowe survival_report miały na czym działać;
+    # reszta pozostaje syntetyczna.
+    panel_ids = [
+        "ENSG00000136352", "ENSG00000131400", "ENSG00000168484", "ENSG00000148773",
+        "ENSG00000131747", "ENSG00000089685", "ENSG00000118785",  # SIGNATURE_PANEL
+        "ENSG00000146648", "ENSG00000133703", "ENSG00000141510", "ENSG00000171094",
+        "ENSG00000047936",  # markery
+    ]
+    for j, ensg in enumerate(panel_ids):
+        genes[j] = ensg
     matrix_data: dict[str, object] = {"gene_id": genes}
     for sample in samples:
         matrix_data[sample] = rng.uniform(0.0, 100.0, N_GENES)
-    # dwa geny stałe — do testu filtra zerowej wariancji
+    # dwa geny stałe — do testu filtra zerowej wariancji; NA KOŃCU listy, żeby nie
+    # nadpisać identyfikatorów panelu LUAD wmapowanych na początku (inaczej gen panelu
+    # miałby stałą ekspresję i median-split w KM dawałby pustą grupę)
     for sample in samples:
-        matrix_data[sample][0] = 5.0
-        matrix_data[sample][1] = 0.0
+        matrix_data[sample][-1] = 5.0
+        matrix_data[sample][-2] = 0.0
 
     sheet = pl.DataFrame({
         "sample_id": samples,
