@@ -99,3 +99,47 @@ def test_gui_wola_write_sample_sheet_zgodnie_z_sygnatura():
         assert len(call.args) >= required, (
             f"wywołanie GUI ma {len(call.args)} argumentów, wymagane {required}"
         )
+
+
+# --- pobieranie: modalność steruje workflow i data_type ------------------------
+
+from src.cli import _resolve_download_target  # noqa: E402
+from src.ingest.gdc_client import build_files_filter  # noqa: E402
+
+
+def test_download_rnaseq_domyslne_parametry():
+    mod, workflow, data_type = _resolve_download_target("rnaseq", None, {})
+    assert mod.id == "rnaseq"
+    assert workflow == "STAR - Counts"
+    assert data_type == "Gene Expression Quantification"
+
+
+def test_download_mirna_ustawia_workflow_i_data_type():
+    """Regresja: download wpinał tylko workflow, data_type zostawał RNA-seq.
+
+    miRNA wymaga innego data_type (miRNA Expression Quantification) i workflow
+    (BCGSC miRNA Profiling) — inaczej filtr GDC zwróciłby pliki RNA-seq.
+    """
+    mod, workflow, data_type = _resolve_download_target("mirna", None, {})
+    assert mod.id == "mirna"
+    assert workflow == "BCGSC miRNA Profiling"
+    assert data_type == "miRNA Expression Quantification"
+
+
+def test_download_jawny_workflow_ma_pierwszenstwo():
+    _, workflow, data_type = _resolve_download_target("mirna", "CUSTOM", {})
+    assert workflow == "CUSTOM"
+    assert data_type == "miRNA Expression Quantification"  # data_type wciąż z modalności
+
+
+def test_download_filtr_niesie_mirna_data_type():
+    _, workflow, data_type = _resolve_download_target("mirna", None, {})
+    filt = build_files_filter(project_id="TCGA-LUAD", workflow_type=workflow, data_type=data_type)
+    values = [cond["content"]["value"][0] for cond in filt["content"]]
+    assert "miRNA Expression Quantification" in values
+    assert "BCGSC miRNA Profiling" in values
+
+
+def test_download_nieznana_modalnosc_zglasza_blad():
+    with pytest.raises(KeyError):
+        _resolve_download_target("rppa", None, {})

@@ -9,7 +9,7 @@ from typing import Optional
 import polars as pl
 import typer
 
-from src.modality import DEFAULT_MODALITY
+from src.modality import DEFAULT_MODALITY, REGISTRY, get_modality
 from src.cli_config import (
     ConfigError,
     get_nested,
@@ -589,6 +589,22 @@ def validate_cohort(
         raise typer.Exit(code=1)
 
 
+def _resolve_download_target(modality_id: str, workflow, cfg: dict):
+    """Rozwiązuje modalność i wynikające z niej parametry pobierania z GDC.
+
+    Zwraca (modality, workflow_type, data_type). ``data_type`` i domyślny
+    ``workflow_type`` pochodzą z modalności (jej ``gdc_filters()``); jawna flaga
+    ``--workflow`` lub wpis w configu mają pierwszeństwo nad domyślnym workflow.
+    Zgłasza KeyError dla nieznanej modalności.
+    """
+    mod = get_modality(modality_id)
+    if workflow is None:
+        workflow = get_nested(
+            cfg, "pipeline", "workflow_type", default=mod.gdc_workflow_type
+        )
+    return mod, workflow, mod.gdc_data_type
+
+
 @app.command("download")
 def download(
     output_dir: Path = typer.Option(
@@ -604,7 +620,13 @@ def download(
     workflow: Optional[str] = typer.Option(
         None,
         "--workflow",
-        help="Workflow GDC. Pierwszeństwo: flaga > config > 'STAR - Counts'.",
+        help="Workflow GDC. Pierwszeństwo: flaga > config > workflow modalności.",
+    ),
+    modality: str = typer.Option(
+        DEFAULT_MODALITY.id,
+        "--modality",
+        help="Modalność danych do pobrania: " + ", ".join(sorted(REGISTRY)) + ". "
+             "Ustawia data_type i domyślny workflow GDC.",
     ),
     size: Optional[int] = typer.Option(
         None,
@@ -648,13 +670,17 @@ def download(
 
     if project is None:
         project = get_nested(cfg, "pipeline", "project_id", default="TCGA-LUAD")
-    if workflow is None:
-        workflow = get_nested(cfg, "pipeline", "workflow_type", default="STAR - Counts")
+    try:
+        mod, workflow, data_type = _resolve_download_target(modality, workflow, cfg)
+    except KeyError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     typer.secho(
-        f"=== Pobieranie kohorty z GDC: project={project}, workflow='{workflow}' ===",
+        f"=== Pobieranie kohorty z GDC: project={project}, modalność={mod.label}, "
+        f"workflow='{workflow}' ===",
         fg=typer.colors.CYAN,
     )
     if size is not None:
@@ -663,7 +689,9 @@ def download(
     typer.echo("")
     typer.echo("[1/4] Zapytanie o metadane plików...")
     try:
-        filt = build_files_filter(project_id=project, workflow_type=workflow)
+        filt = build_files_filter(
+            project_id=project, workflow_type=workflow, data_type=data_type
+        )
         page_size = size if size is not None else 10000
         response = query_files(filters=filt, size=page_size)
     except GDCClientError as exc:

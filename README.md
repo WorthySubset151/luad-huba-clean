@@ -280,6 +280,9 @@ uv run python -m src.cli download --skip-files
 # Pobierz tylko 5 plików dla testów
 uv run python -m src.cli download --size 5
 
+# Pobierz ekspresję miRNA zamiast RNA-seq (ustawia data_type i workflow GDC)
+uv run python -m src.cli download --modality mirna
+
 # Macierz z metryką TPM i obsługą duplikatów (zalecane dla pełnej kohorty)
 uv run python -m src.cli build-matrix --metric tpm --duplicate-strategy deepest
 
