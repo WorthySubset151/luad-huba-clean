@@ -26,26 +26,59 @@ class Modality:
     Atrybuty:
         id: Identyfikator techniczny (klucz w rejestrze, wartość w manifeście).
         label: Nazwa czytelna dla człowieka (etykiety GUI).
-        feature_prefix: Prefiks kolumn cech w zbiorze (np. ``ENSG``).
+        feature_prefix: Prefiks (lub krotka prefiksów) kolumn cech w zbiorze.
+            RNA-seq ma jeden prefiks (``ENSG``); miRNA ma ich kilka
+            (``hsa-mir``, ``hsa-let``), bo nazwy miRBase nie mają wspólnego rdzenia
+            poza ``hsa-`` — a ten byłby zbyt szeroki. Krotka jest tu jawnym sygnałem,
+            że rozpoznanie po nazwie to uproszczenie; docelowo (multi-omics w jednym
+            X) pochodzenie cechy powinna nieść osobna kolumna ``modality``.
         feature_noun: Rzeczownik opisujący pojedynczą cechę (np. ``gen``).
         feature_noun_plural: Ten sam rzeczownik w liczbie mnogiej.
         default_metric: Typowa metryka ilościowa modalności (np. ``TPM``).
+        gdc_data_type: ``data_type`` w API GDC (do filtra pobierania).
+        gdc_workflow_type: ``analysis.workflow_type`` w API GDC.
     """
 
     id: str
     label: str
-    feature_prefix: str
+    feature_prefix: str | tuple[str, ...]
     feature_noun: str
     feature_noun_plural: str
     default_metric: str
+    gdc_data_type: str = ""
+    gdc_workflow_type: str = ""
+
+    @property
+    def _prefixes(self) -> tuple[str, ...]:
+        """Prefiksy jako krotka — niezależnie od tego, czy podano str czy tuple."""
+        if isinstance(self.feature_prefix, str):
+            return (self.feature_prefix,)
+        return tuple(self.feature_prefix)
+
+    def is_feature(self, name: str) -> bool:
+        """Czy nazwa kolumny jest cechą tej modalności."""
+        return name.startswith(self._prefixes)
 
     def feature_columns(self, frame) -> list[str]:
         """Kolumny cech w ramce (polars lub pandas), w kolejności występowania."""
-        return [c for c in frame.columns if c.startswith(self.feature_prefix)]
+        return [c for c in frame.columns if self.is_feature(c)]
 
     def has_features(self, frame) -> bool:
         """Czy ramka zawiera choć jedną kolumnę cech tej modalności."""
-        return any(c.startswith(self.feature_prefix) for c in frame.columns)
+        return any(self.is_feature(c) for c in frame.columns)
+
+    def gdc_filters(self) -> dict:
+        """Filtry pobierania z GDC (data_type + workflow_type), jeśli zdefiniowane.
+
+        Zwraca słownik gotowy do złożenia w zapytanie do API plików GDC. Pusty,
+        gdy modalność nie deklaruje własnej ścieżki pobierania.
+        """
+        filters: dict = {}
+        if self.gdc_data_type:
+            filters["data_type"] = self.gdc_data_type
+        if self.gdc_workflow_type:
+            filters["workflow_type"] = self.gdc_workflow_type
+        return filters
 
 
 RNASEQ = Modality(
@@ -55,9 +88,22 @@ RNASEQ = Modality(
     feature_noun="gen",
     feature_noun_plural="geny",
     default_metric="TPM",
+    gdc_data_type="Gene Expression Quantification",
+    gdc_workflow_type="STAR - Counts",
 )
 
-REGISTRY: dict[str, Modality] = {RNASEQ.id: RNASEQ}
+MIRNA = Modality(
+    id="mirna",
+    label="Ekspresja miRNA (miRNA-seq)",
+    feature_prefix=("hsa-mir", "hsa-let", "hsa-miR"),
+    feature_noun="miRNA",
+    feature_noun_plural="miRNA",
+    default_metric="RPM",
+    gdc_data_type="miRNA Expression Quantification",
+    gdc_workflow_type="BCGSC miRNA Profiling",
+)
+
+REGISTRY: dict[str, Modality] = {RNASEQ.id: RNASEQ, MIRNA.id: MIRNA}
 
 DEFAULT_MODALITY: Modality = RNASEQ
 

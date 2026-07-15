@@ -126,3 +126,44 @@ def test_cohort_summary_przyjmuje_modalnosc(survival_ds):
     from src.analysis.survival_report import cohort_summary
 
     assert cohort_summary(survival_ds, modality=RNASEQ)["n_samples"] == survival_ds.height
+
+
+# --- rozszerzenie: wiele prefiksów, filtry GDC, modalność miRNA -----------------
+
+def test_rnaseq_prefiks_str_dziala_jak_krotka():
+    # wsteczna zgodność: prefiks podany jako str zachowuje się jak jednoelementowa krotka
+    assert RNASEQ._prefixes == ("ENSG",)
+
+
+def test_mirna_rozpoznaje_rodziny_let_i_mir():
+    from src.modality import MIRNA
+
+    frame = pl.DataFrame({
+        "sample_id": ["s1"],
+        "hsa-let-7a-1": [1.0],
+        "hsa-mir-21": [2.0],
+        "hsa-miR-155": [3.0],
+        "ENSG00000146648": [4.0],
+    })
+    features = MIRNA.feature_columns(frame)
+    assert features == ["hsa-let-7a-1", "hsa-mir-21", "hsa-miR-155"]
+    # miRNA i RNA-seq nie mieszają swoich cech
+    assert not set(features) & set(RNASEQ.feature_columns(frame))
+
+
+def test_gdc_filters_rozne_dla_modalnosci():
+    from src.modality import MIRNA
+
+    assert RNASEQ.gdc_filters()["data_type"] == "Gene Expression Quantification"
+    assert MIRNA.gdc_filters()["data_type"] == "miRNA Expression Quantification"
+    assert RNASEQ.gdc_filters()["workflow_type"] != MIRNA.gdc_filters()["workflow_type"]
+
+
+def test_rejestr_zawiera_mirna():
+    assert get_modality("mirna").id == "mirna"
+    assert "mirna" in REGISTRY
+
+
+def test_detect_rozpoznaje_mirna():
+    frame = pl.DataFrame({"sample_id": ["s1"], "hsa-mir-21": [1.0], "hsa-let-7a-1": [2.0]})
+    assert detect_modality(frame) is get_modality("mirna")

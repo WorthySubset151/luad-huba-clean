@@ -325,6 +325,12 @@ LUAD (sygnatura wielogenowa, model Coxa na panelu) pozostają swoiste dla RNA-se
 panel siedmiu genów nie ma odpowiednika w miRNA, więc parametr modalności byłby tam
 pozorny.
 
+Modalność opisuje też prefiks kolumn cech (dla miRNA to kilka prefiksów — `hsa-mir`,
+`hsa-let` — bo nazwy miRBase nie mają wspólnego rdzenia) oraz filtry pobierania z GDC
+(`gdc_filters()`: `data_type` i `workflow_type` różnią się między modalnościami). Druga
+zarejestrowana modalność, `MIRNA`, korzysta z tej samej infrastruktury co RNA-seq;
+parser miRNA jest w `src/ingest/mirna_parser.py`.
+
 ### `src/ingest/` — parsery i klient GDC
 
 **`star_parser.py` — `parse_star_counts(path)`**
@@ -643,6 +649,7 @@ Co jest pokryte:
 | `test_repair_clinical.py` | naprawa kowariantów bez ruszania etykiet i genów |
 | `test_modality.py` | rozpoznawanie cech, rejestr modalności, gotowość rdzenia na inne prefiksy |
 | `test_cli.py` | sample sheet (w tym regresja `Project ID`), mapowanie kodów TCGA |
+| `test_mirna_parser.py` | parser miRNA Expression Quantification (kolumny, typy, walidacja) |
 | `test_smoke.py` | składnia, importy, rejestracja komend CLI, higiena pakietu |
 
 **Nacisk na brak wycieku.** Błąd w tym miejscu nie wywala się głośno — po cichu
