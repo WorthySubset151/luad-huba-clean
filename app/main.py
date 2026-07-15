@@ -1571,7 +1571,7 @@ def render_download(state: dict) -> None:
             if get_sheet:
                 from src.cli import _write_sample_sheet, _write_metadata_cart
                 sheet_path = DATA_RAW / "gdc_sample_sheet.tsv"
-                _write_sample_sheet(files_metadata, sheet_path)
+                _write_sample_sheet(files_metadata, sheet_path, project)
                 _write_metadata_cart(response, DATA_RAW / "metadata.cart.json")
                 msg.append(f"Zapisano sample sheet: {sheet_path.name}")
 

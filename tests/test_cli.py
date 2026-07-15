@@ -68,3 +68,34 @@ def test_kod_tcga_na_tissue_type(code, expected):
 def test_kod_tcga_na_sample_type():
     assert _tcga_code_to_sample_type("01A") == "Primary Tumor"
     assert _tcga_code_to_sample_type("11A") == "Solid Tissue Normal"
+
+
+def test_gui_wola_write_sample_sheet_zgodnie_z_sygnatura():
+    """Regresja: GUI ma własne wywołanie _write_sample_sheet (import z src.cli).
+
+    Zmiana sygnatury w cli.py bez poprawy wywołania w app/main.py dawała w API
+    TypeError (brak argumentu project_id). Test wiąże obie strony: liczba
+    pozycyjnych argumentów w wywołaniu GUI musi pasować do definicji.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    required = sum(
+        1 for p in inspect.signature(_write_sample_sheet).parameters.values()
+        if p.default is inspect.Parameter.empty
+        and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+    )
+
+    main_src = Path(__file__).resolve().parent.parent / "app" / "main.py"
+    calls = [
+        node for node in ast.walk(ast.parse(main_src.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_write_sample_sheet"
+    ]
+    assert calls, "brak wywołania _write_sample_sheet w app/main.py"
+    for call in calls:
+        assert len(call.args) >= required, (
+            f"wywołanie GUI ma {len(call.args)} argumentów, wymagane {required}"
+        )
