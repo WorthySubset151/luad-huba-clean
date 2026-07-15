@@ -9,6 +9,7 @@ from typing import Optional
 import polars as pl
 import typer
 
+from src.modality import DEFAULT_MODALITY
 from src.cli_config import (
     ConfigError,
     get_nested,
@@ -473,7 +474,7 @@ def build_survival(
     out_path = output_dir / "survival_dataset.parquet"
     dataset.write_parquet(out_path)
 
-    n_genes = len([c for c in dataset.columns if c.startswith("ENSG")])
+    n_genes = len(DEFAULT_MODALITY.feature_columns(dataset))
     n_events = int(dataset["event"].sum())
     typer.secho(
         f"Zbiór zapisany: {out_path} "
@@ -680,7 +681,7 @@ def download(
     typer.echo("")
     typer.echo("[2/4] Zapis sample_sheet.tsv i metadata.cart.json...")
     sheet_path = output_dir / "gdc_sample_sheet.tsv"
-    _write_sample_sheet(files_metadata, sheet_path)
+    _write_sample_sheet(files_metadata, sheet_path, project)
     typer.secho(f"  Zapisano: {sheet_path}", fg=typer.colors.GREEN)
 
     metadata_path = output_dir / "metadata.cart.json"
@@ -736,7 +737,7 @@ def download(
     typer.secho("=== Kohorta gotowa w " + str(output_dir) + " ===", fg=typer.colors.BRIGHT_GREEN)
 
 
-def _write_sample_sheet(files_metadata, output_path: Path) -> None:
+def _write_sample_sheet(files_metadata, output_path: Path, project_id: str) -> None:
     """Zapisuje gdc_sample_sheet.tsv w formacie z portalu GDC.
 
     Format zawiera dwie podobne kolumny dotyczące rodzaju próbki:
@@ -749,7 +750,7 @@ def _write_sample_sheet(files_metadata, output_path: Path) -> None:
         pl.col("file_name").alias("File Name"),
         pl.col("data_type").alias("Data Type"),
         pl.col("experimental_strategy").alias("Data Category"),
-        pl.lit("TCGA-LUAD").alias("Project ID"),
+        pl.lit(project_id).alias("Project ID"),
         pl.col("case_submitter_id").alias("Case ID"),
         pl.col("sample_id").alias("Sample ID"),
         pl.col("sample_id")

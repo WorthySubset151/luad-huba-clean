@@ -39,6 +39,7 @@ import app.dashboard_viz as viz
 # Warstwa analityczna (jedno źródło liczb — spójność GUI z terminalem)
 from src.analysis import survival_report as sr
 from src.analysis.expression_report import expression_summary
+from src import modality
 from src.analysis import readiness_report as readiness
 from src.analysis import ml_export
 
@@ -1283,7 +1284,7 @@ def render_dashboard(state: dict) -> None:
             "train/test **grupowany po pacjencie**, selekcja cech i standaryzacja "
             "**fitowane tylko na train** (bez wycieku do testu). Wynik: X/y + manifest w ZIP-ie."
         )
-        _n_genes = len([c for c in ds.columns if c.startswith("ENSG")])
+        _n_genes = len(modality.DEFAULT_MODALITY.feature_columns(ds))
         _c1, _c2, _c3 = st.columns(3)
         _topk = _c1.number_input(
             "Geny (top-K wg wariancji)", min_value=10, max_value=max(_n_genes, 10),

@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import polars as pl
 # Rdzeń analityczny (jedno źródło prawdy metodologii Cox/KM oraz danych panelu).
 from src.analysis import survival_report as sr
+from src.analysis.expression_report import LUAD_MARKERS
 from src.analysis.survival_report import SIGNATURE_PANEL, find_gene_col
 
 # Paleta spójna z notebookami (beż/brąz/zieleń)
@@ -24,15 +25,7 @@ PALETTE = {
 
 # SIGNATURE_PANEL importowany z src/analysis (jedno źródło prawdy panelu genów).
 
-LUAD_MARKERS = {
-    "EGFR":   "ENSG00000146648",
-    "KRAS":   "ENSG00000133703",
-    "TP53":   "ENSG00000141510",
-    "ALK":    "ENSG00000171094",
-    "ROS1":   "ENSG00000047936",
-    "NKX2-1": "ENSG00000136352",
-    "SFTPC":  "ENSG00000168484",
-}
+# LUAD_MARKERS importowany z src/analysis (jedno źródło prawdy panelu markerów).
 
 # Krótkie, precyzyjne charakterystyki genów (rola w LUAD)
 GENE_INFO = {

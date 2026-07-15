@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.modality import DEFAULT_MODALITY, Modality
+
 from .survival_report import MAIN_STAGES, _encode_clinical
 
 
@@ -82,14 +84,14 @@ def _pl(n: int) -> str:
     return f"{n:,}".replace(",", " ")
 
 
-def ml_readiness_report(ds, esum=None) -> dict:
+def ml_readiness_report(ds, esum=None, modality: Modality = DEFAULT_MODALITY) -> dict:
     """Zwraca metryki gotowości ML pogrupowane + zbiorczy werdykt.
 
     ``ds``   — zbiór przeżywalności (polars): sample_id, case_id, event, kowarianty
                kliniczne + kolumny genów (ENSG...).
     ``esum`` — opcjonalny wynik expression_summary (dla wykrytej metryki normalizacji).
     """
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     n_samples = int(ds.height)
     n_features = len(gene_cols)
     pdf = _encode_clinical(ds.to_pandas())

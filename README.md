@@ -296,6 +296,35 @@ uv run python -m src.cli repair-clinical --clinical data/raw/clinical.tsv
 
 ## Omówienie modułów i funkcji
 
+### `src/modality.py` — czym jest cecha
+
+Jedno miejsce definiujące, jak rozpoznać kolumny cech w zbiorze i jak o nich mówić.
+Wcześniej rdzeń zakładał wprost, że cecha to gen z prefiksem `ENSG` — sprawdzenie
+`startswith("ENSG")` powtarzało się w pięciu modułach, więc dodanie kolejnej
+modalności GDC (miRNA, ekspresja białek) wymagałoby zmiany rdzenia w każdym z nich.
+
+`Modality` to niemutowalny opis: identyfikator, etykieta, prefiks kolumn cech,
+rzeczownik opisujący cechę i typowa metryka. Metoda `feature_columns(frame)` zwraca
+kolumny cech (działa dla ramek polars i pandas). Dodanie modalności to dopisanie
+instancji do `REGISTRY`, nie zmiana rdzenia.
+
+```python
+RNASEQ = Modality(
+    id="rnaseq",
+    label="Ekspresja genów (RNA-seq)",
+    feature_prefix="ENSG",
+    feature_noun="gen",
+    feature_noun_plural="geny",
+    default_metric="TPM",
+)
+```
+
+Analizy generyczne (`cohort_summary`, `ml_readiness_report`, `prepare_ml_dataset`)
+przyjmują modalność jako parametr z domyślnym RNA-seq. Analizy oparte na panelu genów
+LUAD (sygnatura wielogenowa, model Coxa na panelu) pozostają swoiste dla RNA-seq —
+panel siedmiu genów nie ma odpowiednika w miRNA, więc parametr modalności byłby tam
+pozorny.
+
 ### `src/ingest/` — parsery i klient GDC
 
 **`star_parser.py` — `parse_star_counts(path)`**
@@ -560,6 +589,7 @@ luad-huba-clean/
 │   ├── ingest/       # parsery + współbieżny klient GDC API
 │   ├── validate/     # QC kohorty
 │   ├── transform/    # macierz, survival dataset
+│   ├── modality.py   # czym jest cecha (RNA-seq dziś, miRNA/RPPA docelowo)
 │   ├── analysis/     # rdzeń: survival, expression, readiness (Gotowość ML), ml_export
 │   ├── manage/       # archiwizacja + bezpieczne kasowanie (data_ops)
 │   ├── export/       # manifest odtwarzalności
@@ -611,6 +641,8 @@ Co jest pokryte:
 | `test_readiness_report.py` | mapowanie metryki normalizacji, kompletność per pole, odporność PCA, η², werdykt |
 | `test_ml_export.py` | **brak wycieku**, fit wyłącznie na train, deduplikacja, determinizm, format archiwum |
 | `test_repair_clinical.py` | naprawa kowariantów bez ruszania etykiet i genów |
+| `test_modality.py` | rozpoznawanie cech, rejestr modalności, gotowość rdzenia na inne prefiksy |
+| `test_cli.py` | sample sheet (w tym regresja `Project ID`), mapowanie kodów TCGA |
 | `test_smoke.py` | składnia, importy, rejestracja komend CLI, higiena pakietu |
 
 **Nacisk na brak wycieku.** Błąd w tym miejscu nie wywala się głośno — po cichu

@@ -31,6 +31,8 @@ __author__ = "Łukasz Połaski"
 
 import numpy as np
 import polars as pl
+
+from src.modality import DEFAULT_MODALITY, Modality
 from lifelines import CoxPHFitter, KaplanMeierFitter
 from lifelines.statistics import logrank_test, multivariate_logrank_test
 
@@ -105,11 +107,11 @@ def _encode_clinical(pdf):
 # ---------------------------------------------------------------------------
 #  Raporty (czyste dane)
 # ---------------------------------------------------------------------------
-def cohort_summary(ds: pl.DataFrame) -> dict:
+def cohort_summary(ds: pl.DataFrame, modality: Modality = DEFAULT_MODALITY) -> dict:
     """Podstawowe liczby kohorty: próbki, zdarzenia, cenzura, geny, stadia."""
     n = ds.height
     n_events = int(ds["event"].sum()) if "event" in ds.columns else 0
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     pdf = _encode_clinical(ds.to_pandas())
     stage_counts = {k: int(v) for k, v in pdf["stage_group"].value_counts().to_dict().items()}
     median_days = float(pdf["time"].median()) if n else 0.0
@@ -213,7 +215,7 @@ def signature_score(ds: pl.DataFrame) -> tuple[np.ndarray, int]:
     Różnicowanie (znak -1) odejmuje, proliferacja/inwazja (znak +1) dodaje —
     wyższy score = profil bardziej agresywny. Zwraca (score, liczba_genów).
     """
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     score = np.zeros(ds.height)
     found = 0
     for _symbol, (ensg, sign) in SIGNATURE_PANEL.items():
@@ -274,7 +276,7 @@ def signature_km_report(ds: pl.DataFrame) -> dict:
 
 def single_gene_km_report(ds: pl.DataFrame, ensg: str, symbol: str) -> dict:
     """KM pojedynczego genu (high/low względem mediany ekspresji) + log-rank."""
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     col = find_gene_col(ensg, gene_cols)
     if col is None:
         return {"error": f"Gen {symbol} ({ensg}) nie znaleziony w macierzy", "symbol": symbol}
@@ -293,7 +295,7 @@ def multi_gene_km_report(ds: pl.DataFrame, genes: list) -> list:
     {symbol, p_value, note, n_high, median_os_high, high_curve} — GUI rysuje
     krzywe high, terminal pokazuje tabelę log-rank.
     """
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     pdf = _encode_clinical(ds.to_pandas())
     results = []
     for symbol, ensg in genes:
@@ -398,7 +400,7 @@ def cox_genes_report(ds: pl.DataFrame) -> dict:
     porównanie C-index było uczciwe (ten sam N). Zwraca rows (geny) + oba
     C-index + delta (wkład genów) + lista pominiętych genów.
     """
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     pdf = _encode_clinical(ds.to_pandas())
 
     feats, missing = [], []

@@ -22,6 +22,8 @@ import zipfile
 import numpy as np
 import pandas as pd
 
+from src.modality import DEFAULT_MODALITY, Modality
+
 _META_CANDIDATES = (
     "sample_id", "case_id", "time", "event",
     "age_at_index", "gender", "ajcc_pathologic_stage", "tissue_type",
@@ -78,12 +80,16 @@ def _grouped_stratified_split(case_ids, events, test_frac: float, seed: int):
 
 
 def prepare_ml_dataset(ds, top_k: int = 2000, test_frac: float = 0.2, seed: int = 42,
-                       dedup: bool = True, standardize: bool = True) -> dict:
+                       dedup: bool = True, standardize: bool = True,
+                       modality: Modality = DEFAULT_MODALITY) -> dict:
     """Buduje zbiór ML z ``ds`` (polars). Zwraca X_train/X_test, y_train/y_test,
     listę genów i manifest. Wszystkie fity są liczone tylko na train."""
-    gene_cols = [c for c in ds.columns if c.startswith("ENSG")]
+    gene_cols = modality.feature_columns(ds)
     if not gene_cols:
-        raise ValueError("Zbiór nie zawiera kolumn genów (ENSG...).")
+        raise ValueError(
+            f"Zbiór nie zawiera kolumn cech modalności {modality.label} "
+            f"(prefiks {modality.feature_prefix})."
+        )
 
     pdf = ds.to_pandas()
     meta_cols = [c for c in _META_CANDIDATES if c in pdf.columns]
