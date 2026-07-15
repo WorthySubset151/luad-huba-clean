@@ -11,7 +11,7 @@ from pathlib import Path
 
 import polars as pl
 
-from src.ingest.file_naming import extract_star_file_stem
+from src.ingest.file_naming import extract_mirna_file_stem, extract_star_file_stem
 
 ALLOWED_METRICS: set[str] = {
     "unstranded",
@@ -20,6 +20,11 @@ ALLOWED_METRICS: set[str] = {
     "tpm_unstranded",
     "fpkm_unstranded",
     "fpkm_uq_unstranded",
+}
+
+MIRNA_ALLOWED_METRICS: set[str] = {
+    "read_count",
+    "reads_per_million_miRNA_mapped",
 }
 
 VALID_DUPLICATE_STRATEGIES: set[str] = {"fail", "deepest", "first"}
@@ -95,51 +100,13 @@ def build_expression_matrix(
             f"Sample sheet nie zawiera wymaganych kolumn: {sorted(missing_cols)}"
         )
 
-    stem_to_sample = _build_stem_to_sample_map(sample_sheet)
+    parquet_paths, sample_ids = _resolve_samples(
+        parquet_paths, sample_sheet, extract_star_file_stem, duplicate_strategy, metric
+    )
 
-    sample_ids: list[str] = []
-    for path in parquet_paths:
-        stem = path.stem
-        if stem not in stem_to_sample:
-            raise ExpressionMatrixError(
-                f"Brak mapowania w sample sheet dla pliku {path.name} (stem: {stem!r})"
-            )
-        sample_ids.append(stem_to_sample[stem])
-
-    if len(set(sample_ids)) != len(sample_ids):
-        if duplicate_strategy == "fail":
-            duplicates = sorted({s for s in sample_ids if sample_ids.count(s) > 1})
-            raise ExpressionMatrixError(
-                f"Duplikaty sample_id w wyniku: {duplicates}"
-            )
-        parquet_paths, sample_ids = _deduplicate(
-            parquet_paths, sample_ids, strategy=duplicate_strategy, metric=metric
-        )
-
-    first_df = _read_and_validate_parquet(parquet_paths[0], metric)
-    reference_genes = first_df["gene_id"]
-    matrix = first_df.rename({metric: sample_ids[0]})
-
-    total_files = len(parquet_paths)
-    if progress_callback is not None:
-        progress_callback(1, total_files)
-
-    for idx, (path, sample_id) in enumerate(zip(parquet_paths[1:], sample_ids[1:]), start=2):
-        df = _read_and_validate_parquet(path, metric)
-        if not df["gene_id"].equals(reference_genes):
-            raise ExpressionMatrixError(
-                f"Plik {path.name} ma inne gene_id niż {parquet_paths[0].name} "
-                f"(różna kolejność lub zawartość genów)"
-            )
-        matrix = matrix.with_columns(df[metric].alias(sample_id))
-        if progress_callback is not None:
-            progress_callback(idx, total_files)
-
-    null_columns = [c for c in matrix.columns if matrix[c].null_count() > 0]
-    if null_columns:
-        raise ExpressionMatrixError(
-            f"Macierz zawiera wartości null w kolumnach: {null_columns}"
-        )
+    matrix = _assemble_feature_matrix(
+        parquet_paths, sample_ids, "gene_id", metric, progress_callback
+    )
 
     if biotype_filter is not None:
         gene_types_df = pl.read_parquet(
@@ -173,6 +140,115 @@ def build_expression_matrix(
     return matrix
 
 
+def build_mirna_matrix(
+    parquet_paths: list[Path],
+    sample_sheet: pl.DataFrame,
+    metric: str = "reads_per_million_miRNA_mapped",
+    duplicate_strategy: str = "fail",
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> pl.DataFrame:
+    """Łączy sparsowane pliki miRNA quantification w jedną macierz ekspresji.
+
+    Odpowiednik ``build_expression_matrix`` dla modalności miRNA: dzieli z nią rdzeń
+    składania (``_assemble_feature_matrix`` — walidacja spójności cech między plikami
+    i brak nulli), różni się kolumną cechy (``miRNA_ID``), dozwolonymi metrykami
+    (``read_count`` / ``reads_per_million_miRNA_mapped``, domyślnie RPM) i sufiksami
+    nazw plików. miRNA nie ma odpowiednika biotype'u, więc filtra po biotypie tu nie ma.
+
+    Zwraca:
+        DataFrame o strukturze ``miRNA_ID | <sample_id_1> | <sample_id_2> | ...``.
+
+    Zgłasza:
+        ExpressionMatrixError: analogicznie do build_expression_matrix (pusta lista,
+            niedozwolona metryka, brak mapowania, niespójne miRNA_ID, duplikaty, nulle).
+    """
+    if not parquet_paths:
+        raise ExpressionMatrixError("Lista plików parquet jest pusta")
+
+    if metric not in MIRNA_ALLOWED_METRICS:
+        raise ExpressionMatrixError(
+            f"Niedozwolona metryka miRNA: {metric!r}. Dozwolone: {sorted(MIRNA_ALLOWED_METRICS)}"
+        )
+
+    if duplicate_strategy not in VALID_DUPLICATE_STRATEGIES:
+        raise ExpressionMatrixError(
+            f"Niedozwolona strategia deduplikacji: {duplicate_strategy!r}. "
+            f"Dozwolone: {sorted(VALID_DUPLICATE_STRATEGIES)}"
+        )
+
+    missing_cols = SAMPLE_SHEET_REQUIRED_COLUMNS - set(sample_sheet.columns)
+    if missing_cols:
+        raise ExpressionMatrixError(
+            f"Sample sheet nie zawiera wymaganych kolumn: {sorted(missing_cols)}"
+        )
+
+    parquet_paths, sample_ids = _resolve_samples(
+        parquet_paths, sample_sheet, extract_mirna_file_stem, duplicate_strategy, metric
+    )
+
+    return _assemble_feature_matrix(
+        parquet_paths, sample_ids, "miRNA_ID", metric, progress_callback
+    )
+
+
+def _resolve_samples(parquet_paths, sample_sheet, stem_fn, duplicate_strategy, metric):
+    """Mapuje pliki na sample_id i rozwiązuje duplikaty. Wspólne dla obu modalności."""
+    stem_to_sample = _build_stem_to_sample_map(sample_sheet, stem_fn)
+
+    sample_ids: list[str] = []
+    for path in parquet_paths:
+        stem = path.stem
+        if stem not in stem_to_sample:
+            raise ExpressionMatrixError(
+                f"Brak mapowania w sample sheet dla pliku {path.name} (stem: {stem!r})"
+            )
+        sample_ids.append(stem_to_sample[stem])
+
+    if len(set(sample_ids)) != len(sample_ids):
+        if duplicate_strategy == "fail":
+            duplicates = sorted({s for s in sample_ids if sample_ids.count(s) > 1})
+            raise ExpressionMatrixError(f"Duplikaty sample_id w wyniku: {duplicates}")
+        parquet_paths, sample_ids = _deduplicate(
+            parquet_paths, sample_ids, strategy=duplicate_strategy, metric=metric
+        )
+    return parquet_paths, sample_ids
+
+
+def _assemble_feature_matrix(parquet_paths, sample_ids, id_column, metric, progress_callback):
+    """Składa macierz cechy×próbki z parsowanych plików (rdzeń wspólny modalnościom).
+
+    Wczytuje pierwszy plik jako referencję kolumny cech, sprawdza, że każdy kolejny
+    ma dokładnie te same cechy w tej samej kolejności (inaczej wartości trafiłyby pod
+    złą cechę — cichy błąd), skleja kolumnę metryki jako kolumnę próbki i waliduje brak
+    nulli. To najbardziej wrażliwa część — trzymana w jednym miejscu dla obu modalności.
+    """
+    first_df = _read_feature_parquet(parquet_paths[0], id_column, metric)
+    reference = first_df[id_column]
+    matrix = first_df.rename({metric: sample_ids[0]})
+
+    total_files = len(parquet_paths)
+    if progress_callback is not None:
+        progress_callback(1, total_files)
+
+    for idx, (path, sample_id) in enumerate(zip(parquet_paths[1:], sample_ids[1:]), start=2):
+        df = _read_feature_parquet(path, id_column, metric)
+        if not df[id_column].equals(reference):
+            raise ExpressionMatrixError(
+                f"Plik {path.name} ma inne {id_column} niż {parquet_paths[0].name} "
+                f"(różna kolejność lub zawartość cech)"
+            )
+        matrix = matrix.with_columns(df[metric].alias(sample_id))
+        if progress_callback is not None:
+            progress_callback(idx, total_files)
+
+    null_columns = [c for c in matrix.columns if matrix[c].null_count() > 0]
+    if null_columns:
+        raise ExpressionMatrixError(
+            f"Macierz zawiera wartości null w kolumnach: {null_columns}"
+        )
+    return matrix
+
+
 def build_manifest(
     matrix: pl.DataFrame,
     parquet_paths: list[Path],
@@ -183,31 +259,39 @@ def build_manifest(
     return _impl(matrix, parquet_paths, metric)
 
 
-def _build_stem_to_sample_map(sample_sheet: pl.DataFrame) -> dict[str, str]:
-    """Buduje mapowanie stem_pliku -> sample_id z arkusza próbek."""
+def _build_stem_to_sample_map(sample_sheet: pl.DataFrame, stem_fn=extract_star_file_stem) -> dict[str, str]:
+    """Buduje mapowanie stem_pliku -> sample_id z arkusza próbek.
+
+    ``stem_fn`` wyciąga identyfikator z nazwy pliku — różny per modalność
+    (STAR vs miRNA). Domyślnie STAR dla wstecznej zgodności.
+    """
     mapping: dict[str, str] = {}
     for row in sample_sheet.select(["file_name", "sample_id"]).iter_rows():
         file_name, sample_id = row
-        stem = extract_star_file_stem(file_name)
+        stem = stem_fn(file_name)
         mapping[stem] = sample_id
     return mapping
 
 
-def _read_and_validate_parquet(path: Path, metric: str) -> pl.DataFrame:
-    """Wczytuje plik Parquet i waliduje obecność wymaganych kolumn."""
+def _read_feature_parquet(path: Path, id_column: str, metric: str) -> pl.DataFrame:
+    """Wczytuje plik Parquet (kolumna cechy + metryka) i waliduje ich obecność."""
     if not path.exists():
         raise ExpressionMatrixError(f"Plik Parquet nie istnieje: {path}")
 
-    df = pl.read_parquet(path, columns=["gene_id", metric])
+    df = pl.read_parquet(path, columns=[id_column, metric])
 
-    required = {"gene_id", metric}
-    missing = required - set(df.columns)
+    missing = {id_column, metric} - set(df.columns)
     if missing:
         raise ExpressionMatrixError(
             f"Plik {path.name} nie zawiera kolumn: {sorted(missing)}"
         )
 
     return df
+
+
+def _read_and_validate_parquet(path: Path, metric: str) -> pl.DataFrame:
+    """Zachowane dla wstecznej zgodności — deleguje do _read_feature_parquet(gene_id)."""
+    return _read_feature_parquet(path, "gene_id", metric)
 
 
 def save_manifest(manifest: dict, output_path: Path) -> None:

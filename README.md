@@ -329,7 +329,10 @@ Modalność opisuje też prefiks kolumn cech (dla miRNA to kilka prefiksów — 
 `hsa-let` — bo nazwy miRBase nie mają wspólnego rdzenia) oraz filtry pobierania z GDC
 (`gdc_filters()`: `data_type` i `workflow_type` różnią się między modalnościami). Druga
 zarejestrowana modalność, `MIRNA`, korzysta z tej samej infrastruktury co RNA-seq;
-parser miRNA jest w `src/ingest/mirna_parser.py`.
+parser miRNA jest w `src/ingest/mirna_parser.py`, a macierz cechy×próbki buduje
+`build_mirna_matrix` w `src/transform/expression_matrix.py` — dzieli z RNA-seq wrażliwy
+rdzeń składania (walidacja spójności cech między plikami i brak wartości brakujących),
+różni się kolumną cechy (`miRNA_ID`), metrykami (RPM) i sufiksami nazw plików.
 
 ### `src/ingest/` — parsery i klient GDC
 
@@ -650,6 +653,8 @@ Co jest pokryte:
 | `test_modality.py` | rozpoznawanie cech, rejestr modalności, gotowość rdzenia na inne prefiksy |
 | `test_cli.py` | sample sheet (w tym regresja `Project ID`), mapowanie kodów TCGA |
 | `test_mirna_parser.py` | parser miRNA Expression Quantification (kolumny, typy, walidacja) |
+| `test_expression_matrix.py` | budowa macierzy RNA-seq (metryki, biotype, mapowanie, dedup) |
+| `test_mirna_matrix.py` | budowa macierzy miRNA — wspólny rdzeń składania z RNA-seq |
 | `test_smoke.py` | składnia, importy, rejestracja komend CLI, higiena pakietu |
 
 **Nacisk na brak wycieku.** Błąd w tym miejscu nie wywala się głośno — po cichu
